@@ -349,6 +349,19 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
 
 ## Roadmap
 
+### In Progress
+- [ ] **External Debugging & Trace Tools** ([Research Report](reports/2025-12-02-013-abap-debugging-and-trace-research.md) | [Verification](reports/2025-12-02-014-debugging-tools-summary-and-verification.md))
+  - [ ] DebuggerAttach - Attach to running process
+  - [ ] DebuggerSetBreakpoint - Set breakpoints with conditions
+  - [ ] DebuggerStep - Step through execution
+  - [ ] DebuggerGetVariables - Inspect variables
+  - [ ] DebuggerSetVariable - Mock values during execution
+  - [ ] DebuggerGetCallStack - Get call stack
+  - [ ] DebuggerStartTrace - Start ABAP/SQL/profile trace
+  - [ ] DebuggerGetTraceResults - Analyze trace data
+- [ ] **CDS Dependency Analysis** - Extract dependency tree for CDS views
+- [ ] **$ZRAY Local Implementation** - Execute framework code locally
+
 ### Planned Features
 - [ ] Transport Management (create, release, add objects)
 - [ ] ATC (ABAP Test Cockpit) integration
@@ -361,6 +374,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture documentation.
 - [ ] WebSocket transport for real-time updates
 - [ ] Batch operations for bulk changes
 - [ ] Code generation templates
+- [ ] Time-travel debugging with execution replay
+- [ ] AI-powered test generation from traces
+- [ ] Call graph visualization and export
 
 ## License
 
