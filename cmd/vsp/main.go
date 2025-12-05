@@ -79,6 +79,7 @@ func init() {
 
 	// Mode options
 	rootCmd.Flags().StringVar(&cfg.Mode, "mode", "focused", "Tool mode: focused (19 essential tools) or expert (all 45 tools)")
+	rootCmd.Flags().StringVar(&cfg.DisabledGroups, "disabled-groups", "", "Disable tool groups: 5/U=UI5, T=Tests, H=HANA, D=Debug (e.g., \"TH\" disables Tests and HANA)")
 
 	// Output options
 	rootCmd.Flags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable verbose output to stderr")
@@ -99,6 +100,7 @@ func init() {
 	viper.BindPFlag("allowed-packages", rootCmd.Flags().Lookup("allowed-packages"))
 	viper.BindPFlag("enable-transports", rootCmd.Flags().Lookup("enable-transports"))
 	viper.BindPFlag("mode", rootCmd.Flags().Lookup("mode"))
+	viper.BindPFlag("disabled-groups", rootCmd.Flags().Lookup("disabled-groups"))
 	viper.BindPFlag("verbose", rootCmd.Flags().Lookup("verbose"))
 
 	// Set up environment variable mapping
@@ -124,6 +126,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "[VERBOSE] Starting vsp server\n")
 		fmt.Fprintf(os.Stderr, "[VERBOSE] Mode: %s\n", cfg.Mode)
+		if cfg.DisabledGroups != "" {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] Disabled groups: %s (5/U=UI5, T=Tests, H=HANA, D=Debug)\n", cfg.DisabledGroups)
+		}
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP URL: %s\n", cfg.BaseURL)
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP Client: %s\n", cfg.Client)
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP Language: %s\n", cfg.Language)
@@ -217,6 +222,13 @@ func resolveConfig(cmd *cobra.Command) {
 	if !cmd.Flags().Changed("mode") {
 		if envMode := viper.GetString("MODE"); envMode != "" {
 			cfg.Mode = envMode
+		}
+	}
+
+	// DisabledGroups: flag > SAP_DISABLED_GROUPS env
+	if !cmd.Flags().Changed("disabled-groups") {
+		if envGroups := viper.GetString("DISABLED_GROUPS"); envGroups != "" {
+			cfg.DisabledGroups = envGroups
 		}
 	}
 

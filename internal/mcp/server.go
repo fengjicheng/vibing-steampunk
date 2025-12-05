@@ -37,6 +37,11 @@ type Config struct {
 	// Mode: focused or expert (default: focused)
 	Mode string
 
+	// DisabledGroups disables groups of tools using short codes:
+	// 5/U = UI5/BSP tools, T = Test tools, H = HANA/AMDP debugger, D = ABAP Debugger
+	// Example: "TH" disables Tests and HANA debugger tools
+	DisabledGroups string
+
 	// Safety configuration
 	ReadOnly         bool
 	BlockFreeSQL     bool
@@ -100,8 +105,8 @@ func NewServer(cfg *Config) *Server {
 		adtClient: adtClient,
 	}
 
-	// Register tools based on mode
-	s.registerTools(cfg.Mode)
+	// Register tools based on mode and disabled groups
+	s.registerTools(cfg.Mode, cfg.DisabledGroups)
 
 	return s
 }
@@ -111,10 +116,48 @@ func (s *Server) ServeStdio() error {
 	return server.ServeStdio(s.mcpServer)
 }
 
-// registerTools registers ADT tools with the MCP server based on mode.
+// registerTools registers ADT tools with the MCP server based on mode and disabled groups.
 // Mode "focused" registers 41 essential tools.
 // Mode "expert" registers all 68 tools.
-func (s *Server) registerTools(mode string) {
+// DisabledGroups can disable specific tool groups using short codes:
+//   - "5" or "U" = UI5/BSP tools (7 tools)
+//   - "T" = Test tools: RunUnitTests, RunATCCheck (2 tools)
+//   - "H" = HANA/AMDP debugger (5 tools)
+//   - "D" = ABAP Debugger (9 tools: external breakpoints + debugger session)
+func (s *Server) registerTools(mode string, disabledGroups string) {
+	// Define tool groups for selective disablement
+	// Short codes: 5/U=UI5, T=Tests, H=HANA, D=Debug
+	toolGroups := map[string][]string{
+		"5": { // UI5/BSP tools (also mapped as "U")
+			"UI5ListApps", "UI5GetApp", "UI5GetFileContent",
+			"UI5UploadFile", "UI5DeleteFile", "UI5CreateApp", "UI5DeleteApp",
+		},
+		"T": { // Test tools
+			"RunUnitTests", "RunATCCheck",
+		},
+		"H": { // HANA/AMDP debugger
+			"AMDPDebuggerStart", "AMDPDebuggerResume", "AMDPDebuggerStop",
+			"AMDPDebuggerStep", "AMDPGetVariables",
+		},
+		"D": { // ABAP debugger (external breakpoints + session)
+			"SetExternalBreakpoint", "GetExternalBreakpoints", "DeleteExternalBreakpoint",
+			"DebuggerListen", "DebuggerAttach", "DebuggerDetach",
+			"DebuggerStep", "DebuggerGetStack", "DebuggerGetVariables",
+		},
+	}
+	// Map "U" to same tools as "5"
+	toolGroups["U"] = toolGroups["5"]
+
+	// Build set of disabled tools based on disabledGroups string
+	disabledTools := make(map[string]bool)
+	for _, code := range strings.ToUpper(disabledGroups) {
+		if tools, ok := toolGroups[string(code)]; ok {
+			for _, tool := range tools {
+				disabledTools[tool] = true
+			}
+		}
+	}
+
 	// Define focused mode tool whitelist (41 essential tools)
 	focusedTools := map[string]bool{
 		// Unified tools (2)
@@ -187,14 +230,34 @@ func (s *Server) registerTools(mode string) {
 		"DebuggerStep":         true, // Step through code
 		"DebuggerGetStack":     true, // Get call stack
 		"DebuggerGetVariables": true, // Get variable values
+
+		// UI5/Fiori BSP Management (7)
+		"UI5ListApps":       true, // List UI5 applications
+		"UI5GetApp":         true, // Get UI5 app details
+		"UI5GetFileContent": true, // Get file content from UI5 app
+		"UI5UploadFile":     true, // Upload file to UI5 app
+		"UI5DeleteFile":     true, // Delete file from UI5 app
+		"UI5CreateApp":      true, // Create new UI5 app
+		"UI5DeleteApp":      true, // Delete UI5 app
+
+		// AMDP (HANA) Debugger (5)
+		"AMDPDebuggerStart":  true, // Start AMDP debug session
+		"AMDPDebuggerResume": true, // Resume/wait for AMDP events
+		"AMDPDebuggerStop":   true, // Stop AMDP debug session
+		"AMDPDebuggerStep":   true, // Step through AMDP code
+		"AMDPGetVariables":   true, // Get AMDP variable values
 	}
 
 	// Helper to check if tool should be registered
 	shouldRegister := func(toolName string) bool {
-		if mode == "expert" {
-			return true // Expert mode: register all tools
+		// Check if tool is disabled by group
+		if disabledTools[toolName] {
+			return false
 		}
-		return focusedTools[toolName] // Focused mode: only whitelisted tools
+		if mode == "expert" {
+			return true // Expert mode: register all tools (except disabled)
+		}
+		return focusedTools[toolName] // Focused mode: only whitelisted tools (except disabled)
 	}
 
 	// Unified Tools (Focused Mode) - NEW
@@ -1480,6 +1543,191 @@ func (s *Server) registerTools(mode string) {
 				mcp.Description("Prefix for temp program name (default: ZTEMP_EXEC_)"),
 			),
 		), s.handleExecuteABAP)
+	}
+
+	// --- UI5/Fiori BSP Management ---
+
+	// UI5ListApps
+	if shouldRegister("UI5ListApps") {
+		s.mcpServer.AddTool(mcp.NewTool("UI5ListApps",
+			mcp.WithDescription("List UI5/Fiori BSP applications. Use query parameter for filtering with wildcards (*)."),
+			mcp.WithString("query",
+				mcp.Description("Search query (supports * wildcard, e.g., 'Z*' for custom apps)"),
+			),
+			mcp.WithNumber("max_results",
+				mcp.Description("Maximum number of results (default: 100)"),
+			),
+		), s.handleUI5ListApps)
+	}
+
+	// UI5GetApp
+	if shouldRegister("UI5GetApp") {
+		s.mcpServer.AddTool(mcp.NewTool("UI5GetApp",
+			mcp.WithDescription("Get details of a UI5/Fiori BSP application including file structure."),
+			mcp.WithString("app_name",
+				mcp.Required(),
+				mcp.Description("Name of the UI5 application"),
+			),
+		), s.handleUI5GetApp)
+	}
+
+	// UI5GetFileContent
+	if shouldRegister("UI5GetFileContent") {
+		s.mcpServer.AddTool(mcp.NewTool("UI5GetFileContent",
+			mcp.WithDescription("Get content of a specific file within a UI5/Fiori BSP application."),
+			mcp.WithString("app_name",
+				mcp.Required(),
+				mcp.Description("Name of the UI5 application"),
+			),
+			mcp.WithString("file_path",
+				mcp.Required(),
+				mcp.Description("Path to the file within the app (e.g., '/webapp/manifest.json')"),
+			),
+		), s.handleUI5GetFileContent)
+	}
+
+	// UI5UploadFile
+	if shouldRegister("UI5UploadFile") {
+		s.mcpServer.AddTool(mcp.NewTool("UI5UploadFile",
+			mcp.WithDescription("Upload a file to a UI5/Fiori BSP application."),
+			mcp.WithString("app_name",
+				mcp.Required(),
+				mcp.Description("Name of the UI5 application"),
+			),
+			mcp.WithString("file_path",
+				mcp.Required(),
+				mcp.Description("Path for the file within the app (e.g., '/webapp/Component.js')"),
+			),
+			mcp.WithString("content",
+				mcp.Required(),
+				mcp.Description("File content to upload"),
+			),
+			mcp.WithString("content_type",
+				mcp.Description("Content type (e.g., 'application/javascript', 'application/json')"),
+			),
+		), s.handleUI5UploadFile)
+	}
+
+	// UI5DeleteFile
+	if shouldRegister("UI5DeleteFile") {
+		s.mcpServer.AddTool(mcp.NewTool("UI5DeleteFile",
+			mcp.WithDescription("Delete a file from a UI5/Fiori BSP application."),
+			mcp.WithString("app_name",
+				mcp.Required(),
+				mcp.Description("Name of the UI5 application"),
+			),
+			mcp.WithString("file_path",
+				mcp.Required(),
+				mcp.Description("Path to the file to delete (e.g., '/webapp/test.js')"),
+			),
+		), s.handleUI5DeleteFile)
+	}
+
+	// UI5CreateApp
+	if shouldRegister("UI5CreateApp") {
+		s.mcpServer.AddTool(mcp.NewTool("UI5CreateApp",
+			mcp.WithDescription("Create a new UI5/Fiori BSP application."),
+			mcp.WithString("app_name",
+				mcp.Required(),
+				mcp.Description("Name for the new UI5 application"),
+			),
+			mcp.WithString("description",
+				mcp.Description("Description of the application"),
+			),
+			mcp.WithString("package",
+				mcp.Required(),
+				mcp.Description("Package name (e.g., '$TMP' for local, 'ZFIORI' for transportable)"),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Transport request number (optional for local packages)"),
+			),
+		), s.handleUI5CreateApp)
+	}
+
+	// UI5DeleteApp
+	if shouldRegister("UI5DeleteApp") {
+		s.mcpServer.AddTool(mcp.NewTool("UI5DeleteApp",
+			mcp.WithDescription("Delete a UI5/Fiori BSP application."),
+			mcp.WithString("app_name",
+				mcp.Required(),
+				mcp.Description("Name of the UI5 application to delete"),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Transport request number (optional for local packages)"),
+			),
+		), s.handleUI5DeleteApp)
+	}
+
+	// --- AMDP (HANA) Debugger ---
+
+	// AMDPDebuggerStart
+	if shouldRegister("AMDPDebuggerStart") {
+		s.mcpServer.AddTool(mcp.NewTool("AMDPDebuggerStart",
+			mcp.WithDescription("Start an AMDP (HANA SQLScript) debug session. Use cascade_mode='FULL' to debug nested procedure calls."),
+			mcp.WithString("user",
+				mcp.Description("User to debug (defaults to current user)"),
+			),
+			mcp.WithString("cascade_mode",
+				mcp.Description("Debug mode: 'NONE' (direct procedure only) or 'FULL' (all nested procedures, default)"),
+			),
+		), s.handleAMDPDebuggerStart)
+	}
+
+	// AMDPDebuggerResume
+	if shouldRegister("AMDPDebuggerResume") {
+		s.mcpServer.AddTool(mcp.NewTool("AMDPDebuggerResume",
+			mcp.WithDescription("Resume AMDP debug session and wait for events. Blocking long-poll that returns on breakpoint hit or execution end."),
+			mcp.WithString("main_id",
+				mcp.Required(),
+				mcp.Description("Main ID from AMDPDebuggerStart"),
+			),
+			mcp.WithNumber("timeout",
+				mcp.Description("Timeout in seconds (default: 60, max: 240)"),
+			),
+		), s.handleAMDPDebuggerResume)
+	}
+
+	// AMDPDebuggerStop
+	if shouldRegister("AMDPDebuggerStop") {
+		s.mcpServer.AddTool(mcp.NewTool("AMDPDebuggerStop",
+			mcp.WithDescription("Stop an AMDP debug session."),
+			mcp.WithString("main_id",
+				mcp.Required(),
+				mcp.Description("Main ID from AMDPDebuggerStart"),
+			),
+			mcp.WithBoolean("hard_stop",
+				mcp.Description("Terminate debuggee immediately (default: false)"),
+			),
+		), s.handleAMDPDebuggerStop)
+	}
+
+	// AMDPDebuggerStep
+	if shouldRegister("AMDPDebuggerStep") {
+		s.mcpServer.AddTool(mcp.NewTool("AMDPDebuggerStep",
+			mcp.WithDescription("Perform a step operation in the AMDP debugger."),
+			mcp.WithString("main_id",
+				mcp.Required(),
+				mcp.Description("Main ID from AMDPDebuggerStart"),
+			),
+			mcp.WithString("step_type",
+				mcp.Required(),
+				mcp.Description("Step type: 'stepInto', 'stepOver', 'stepReturn', 'stepContinue'"),
+			),
+		), s.handleAMDPDebuggerStep)
+	}
+
+	// AMDPGetVariables
+	if shouldRegister("AMDPGetVariables") {
+		s.mcpServer.AddTool(mcp.NewTool("AMDPGetVariables",
+			mcp.WithDescription("Get variable values during AMDP debugging. Returns scalar, table, and array types."),
+			mcp.WithString("main_id",
+				mcp.Required(),
+				mcp.Description("Main ID from AMDPDebuggerStart"),
+			),
+			mcp.WithArray("variable_ids",
+				mcp.Description("Variable IDs to retrieve"),
+			),
+		), s.handleAMDPGetVariables)
 	}
 
 }
@@ -4035,6 +4283,337 @@ func (s *Server) handleDebuggerGetVariables(ctx context.Context, request mcp.Cal
 		}
 		if v.IsComplexType() {
 			sb.WriteString("  (complex type - expandable)\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// --- UI5/Fiori BSP Management Handlers ---
+
+func (s *Server) handleUI5ListApps(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query, _ := request.Params.Arguments["query"].(string)
+
+	maxResults := 100
+	if mr, ok := request.Params.Arguments["max_results"].(float64); ok {
+		maxResults = int(mr)
+	}
+
+	apps, err := s.adtClient.UI5ListApps(ctx, query, maxResults)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("UI5ListApps failed: %v", err)), nil
+	}
+
+	if len(apps) == 0 {
+		return mcp.NewToolResultText("No UI5 applications found"), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Found %d UI5 applications:\n\n", len(apps)))
+
+	for _, app := range apps {
+		sb.WriteString(fmt.Sprintf("- %s", app.Name))
+		if app.Description != "" {
+			sb.WriteString(fmt.Sprintf(" (%s)", app.Description))
+		}
+		if app.Package != "" {
+			sb.WriteString(fmt.Sprintf(" [%s]", app.Package))
+		}
+		sb.WriteString("\n")
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+func (s *Server) handleUI5GetApp(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	appName, ok := request.Params.Arguments["app_name"].(string)
+	if !ok || appName == "" {
+		return newToolResultError("app_name is required"), nil
+	}
+
+	details, err := s.adtClient.UI5GetApp(ctx, appName)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("UI5GetApp failed: %v", err)), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("UI5 Application: %s\n", details.Name))
+	if details.Description != "" {
+		sb.WriteString(fmt.Sprintf("Description: %s\n", details.Description))
+	}
+	if details.Package != "" {
+		sb.WriteString(fmt.Sprintf("Package: %s\n", details.Package))
+	}
+
+	if len(details.Files) > 0 {
+		sb.WriteString(fmt.Sprintf("\nFiles (%d):\n", len(details.Files)))
+		for _, f := range details.Files {
+			if f.Type == "folder" {
+				sb.WriteString(fmt.Sprintf("  [DIR]  %s\n", f.Path))
+			} else {
+				sb.WriteString(fmt.Sprintf("  [FILE] %s", f.Path))
+				if f.Size > 0 {
+					sb.WriteString(fmt.Sprintf(" (%d bytes)", f.Size))
+				}
+				sb.WriteString("\n")
+			}
+		}
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+func (s *Server) handleUI5GetFileContent(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	appName, ok := request.Params.Arguments["app_name"].(string)
+	if !ok || appName == "" {
+		return newToolResultError("app_name is required"), nil
+	}
+
+	filePath, ok := request.Params.Arguments["file_path"].(string)
+	if !ok || filePath == "" {
+		return newToolResultError("file_path is required"), nil
+	}
+
+	content, err := s.adtClient.UI5GetFileContent(ctx, appName, filePath)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("UI5GetFileContent failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(content)), nil
+}
+
+func (s *Server) handleUI5UploadFile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	appName, ok := request.Params.Arguments["app_name"].(string)
+	if !ok || appName == "" {
+		return newToolResultError("app_name is required"), nil
+	}
+
+	filePath, ok := request.Params.Arguments["file_path"].(string)
+	if !ok || filePath == "" {
+		return newToolResultError("file_path is required"), nil
+	}
+
+	content, ok := request.Params.Arguments["content"].(string)
+	if !ok {
+		return newToolResultError("content is required"), nil
+	}
+
+	contentType, _ := request.Params.Arguments["content_type"].(string)
+
+	err := s.adtClient.UI5UploadFile(ctx, appName, filePath, []byte(content), contentType)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("UI5UploadFile failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully uploaded %s to %s", filePath, appName)), nil
+}
+
+func (s *Server) handleUI5DeleteFile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	appName, ok := request.Params.Arguments["app_name"].(string)
+	if !ok || appName == "" {
+		return newToolResultError("app_name is required"), nil
+	}
+
+	filePath, ok := request.Params.Arguments["file_path"].(string)
+	if !ok || filePath == "" {
+		return newToolResultError("file_path is required"), nil
+	}
+
+	err := s.adtClient.UI5DeleteFile(ctx, appName, filePath)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("UI5DeleteFile failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully deleted %s from %s", filePath, appName)), nil
+}
+
+func (s *Server) handleUI5CreateApp(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	appName, ok := request.Params.Arguments["app_name"].(string)
+	if !ok || appName == "" {
+		return newToolResultError("app_name is required"), nil
+	}
+
+	description, _ := request.Params.Arguments["description"].(string)
+
+	packageName, ok := request.Params.Arguments["package"].(string)
+	if !ok || packageName == "" {
+		return newToolResultError("package is required"), nil
+	}
+
+	transport, _ := request.Params.Arguments["transport"].(string)
+
+	err := s.adtClient.UI5CreateApp(ctx, appName, description, packageName, transport)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("UI5CreateApp failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully created UI5 application %s in package %s", appName, packageName)), nil
+}
+
+func (s *Server) handleUI5DeleteApp(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	appName, ok := request.Params.Arguments["app_name"].(string)
+	if !ok || appName == "" {
+		return newToolResultError("app_name is required"), nil
+	}
+
+	transport, _ := request.Params.Arguments["transport"].(string)
+
+	err := s.adtClient.UI5DeleteApp(ctx, appName, transport)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("UI5DeleteApp failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully deleted UI5 application %s", appName)), nil
+}
+
+// --- AMDP (HANA) Debugger Handlers ---
+
+func (s *Server) handleAMDPDebuggerStart(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	user, _ := request.Params.Arguments["user"].(string)
+	cascadeMode, _ := request.Params.Arguments["cascade_mode"].(string)
+
+	session, err := s.adtClient.AMDPDebuggerStart(ctx, user, cascadeMode)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("AMDPDebuggerStart failed: %v", err)), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("AMDP Debug Session Started\n\n")
+	sb.WriteString(fmt.Sprintf("Main ID: %s\n", session.MainID))
+	sb.WriteString(fmt.Sprintf("User: %s\n", session.User))
+	sb.WriteString(fmt.Sprintf("Cascade Mode: %s\n", session.CascadeMode))
+	sb.WriteString("\nUse AMDPDebuggerResume with the main_id to wait for breakpoints.")
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+func (s *Server) handleAMDPDebuggerResume(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	mainID, ok := request.Params.Arguments["main_id"].(string)
+	if !ok || mainID == "" {
+		return newToolResultError("main_id is required"), nil
+	}
+
+	timeout := 60
+	if t, ok := request.Params.Arguments["timeout"].(float64); ok {
+		timeout = int(t)
+	}
+
+	resp, err := s.adtClient.AMDPDebuggerResume(ctx, mainID, timeout)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("AMDPDebuggerResume failed: %v", err)), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Event: %s\n\n", resp.Kind))
+
+	if resp.Position != nil {
+		sb.WriteString(fmt.Sprintf("Position: %s line %d\n", resp.Position.ObjectName, resp.Position.Line))
+	}
+
+	if len(resp.CallStack) > 0 {
+		sb.WriteString("\nCall Stack:\n")
+		for _, frame := range resp.CallStack {
+			sb.WriteString(fmt.Sprintf("  [%d] %s at %s:%d\n", frame.Level, frame.Name, frame.Position.ObjectName, frame.Position.Line))
+		}
+	}
+
+	if len(resp.Variables) > 0 {
+		sb.WriteString("\nVariables:\n")
+		for _, v := range resp.Variables {
+			sb.WriteString(fmt.Sprintf("  %s (%s): %s\n", v.Name, v.Type, v.Value))
+		}
+	}
+
+	if resp.Message != "" {
+		sb.WriteString(fmt.Sprintf("\nMessage: %s\n", resp.Message))
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+func (s *Server) handleAMDPDebuggerStop(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	mainID, ok := request.Params.Arguments["main_id"].(string)
+	if !ok || mainID == "" {
+		return newToolResultError("main_id is required"), nil
+	}
+
+	hardStop := false
+	if hs, ok := request.Params.Arguments["hard_stop"].(bool); ok {
+		hardStop = hs
+	}
+
+	err := s.adtClient.AMDPDebuggerStop(ctx, mainID, hardStop)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("AMDPDebuggerStop failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Successfully stopped AMDP debug session %s", mainID)), nil
+}
+
+func (s *Server) handleAMDPDebuggerStep(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	mainID, ok := request.Params.Arguments["main_id"].(string)
+	if !ok || mainID == "" {
+		return newToolResultError("main_id is required"), nil
+	}
+
+	stepType, ok := request.Params.Arguments["step_type"].(string)
+	if !ok || stepType == "" {
+		return newToolResultError("step_type is required"), nil
+	}
+
+	resp, err := s.adtClient.AMDPDebuggerStep(ctx, mainID, stepType)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("AMDPDebuggerStep failed: %v", err)), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Step Result: %s\n\n", resp.Kind))
+
+	if resp.Position != nil {
+		sb.WriteString(fmt.Sprintf("Position: %s line %d\n", resp.Position.ObjectName, resp.Position.Line))
+	}
+
+	if len(resp.CallStack) > 0 {
+		sb.WriteString("\nCall Stack:\n")
+		for _, frame := range resp.CallStack {
+			sb.WriteString(fmt.Sprintf("  [%d] %s at %s:%d\n", frame.Level, frame.Name, frame.Position.ObjectName, frame.Position.Line))
+		}
+	}
+
+	return mcp.NewToolResultText(sb.String()), nil
+}
+
+func (s *Server) handleAMDPGetVariables(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	mainID, ok := request.Params.Arguments["main_id"].(string)
+	if !ok || mainID == "" {
+		return newToolResultError("main_id is required"), nil
+	}
+
+	var variableIDs []string
+	if ids, ok := request.Params.Arguments["variable_ids"].([]interface{}); ok {
+		for _, id := range ids {
+			if s, ok := id.(string); ok {
+				variableIDs = append(variableIDs, s)
+			}
+		}
+	}
+
+	vars, err := s.adtClient.AMDPGetScalarValues(ctx, mainID, variableIDs)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("AMDPGetVariables failed: %v", err)), nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("AMDP Variables:\n\n")
+
+	for _, v := range vars {
+		sb.WriteString(fmt.Sprintf("%s (%s)", v.Name, v.Type))
+		if v.Value != "" {
+			sb.WriteString(fmt.Sprintf(" = %s", v.Value))
+		}
+		if v.Rows > 0 {
+			sb.WriteString(fmt.Sprintf(" [%d rows]", v.Rows))
 		}
 		sb.WriteString("\n")
 	}

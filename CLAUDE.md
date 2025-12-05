@@ -47,6 +47,7 @@ SAP_URL=http://host:50000 SAP_USER=user SAP_PASSWORD=pass ./vsp
 | `SAP_COOKIE_FILE` / `--cookie-file` | Path to Netscape-format cookie file |
 | `SAP_COOKIE_STRING` / `--cookie-string` | Cookie string (key1=val1; key2=val2) |
 | `SAP_MODE` / `--mode` | Tool mode: `focused` (20 tools, default) or `expert` (47 tools) |
+| `SAP_DISABLED_GROUPS` / `--disabled-groups` | Disable tool groups: `5`/`U`=UI5, `T`=Tests, `H`=HANA, `D`=Debug |
 | `SAP_VERBOSE` / `--verbose` | Enable verbose logging to stderr |
 | **Safety Configuration** | |
 | `SAP_READ_ONLY` / `--read-only` | Block all write operations (default: false) |
@@ -67,6 +68,8 @@ pkg/
 │   ├── devtools.go           # Dev tools (syntax check, activate, unit tests)
 │   ├── codeintel.go          # Code intelligence (find def, refs, completion)
 │   ├── debugger.go           # External debugger (breakpoints, listener)
+│   ├── amdp_debugger.go      # HANA/AMDP debugger (SQLScript debugging)
+│   ├── ui5.go                # UI5/Fiori BSP management
 │   ├── workflows.go          # High-level workflow operations
 │   ├── cds.go                # CDS view dependency analysis
 │   ├── safety.go             # Safety & protection configuration
@@ -102,7 +105,9 @@ pkg/
 | Add CRUD operation | `pkg/adt/crud.go` |
 | Add development tool | `pkg/adt/devtools.go` |
 | Add code intelligence | `pkg/adt/codeintel.go` |
-| Add debugger feature | `pkg/adt/debugger.go` |
+| Add ABAP debugger feature | `pkg/adt/debugger.go` |
+| Add HANA/AMDP debugger | `pkg/adt/amdp_debugger.go` |
+| Add UI5/BSP feature | `pkg/adt/ui5.go` |
 | Add workflow | `pkg/adt/workflows.go` |
 | Add XML types | `pkg/adt/xml.go` |
 | Add integration test | `pkg/adt/integration_test.go` |
@@ -293,7 +298,7 @@ When creating a new report:
 
 | Metric | Value |
 |--------|-------|
-| **Tools** | 68 (41 focused, 68 expert) |
+| **Tools** | 80 (53 focused, 80 expert) |
 | **Unit Tests** | 270 |
 | **Integration Tests** | 34 |
 | **Platforms** | 9 |
@@ -310,6 +315,9 @@ When creating a new report:
 | **SQL Trace** | ✅ Complete (GetSQLTraceState, ListSQLTraces - ST05) |
 | **RAP OData E2E** | ✅ Complete (DDLS, SRVD, SRVB create + publish) |
 | **External Debugger** | ✅ Complete (Breakpoints, Debug Listener, Debuggee parsing) |
+| **AMDP Debugger** | ✅ Complete (HANA SQLScript debugging via ADT) |
+| **UI5/BSP Mgmt** | ✅ Partial (Read ops work; Create needs alternate API) |
+| **Tool Groups** | ✅ Complete (--disabled-groups: 5/U, T, H, D) |
 
 ### DSL & Workflow Usage
 
