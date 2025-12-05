@@ -3,6 +3,18 @@
 
 ## What's New
 
+**v2.11.0** - Transport Management & Safety Controls
+- **5 Transport Tools**: ListTransports, GetTransport, CreateTransport, ReleaseTransport, DeleteTransport
+- **Safety Controls**: `--enable-transports`, `--transport-read-only`, `--allowed-transports "A4HK*"`
+- **Tool Group "C"**: Disable all CTS tools with `--disabled-groups C`
+- Enterprise-grade transport governance for AI assistants
+
+**v2.10.0** - UI5/BSP Management & Tool Groups
+- **7 UI5/BSP Tools**: List apps, read files, search content, view manifests
+- **AMDP Debugger**: 5 tools for HANA stored procedure debugging
+- **Tool Groups**: Selectively disable features (`--disabled-groups 5THD`)
+- **68 Total Tools**: 41 focused mode, 68 expert mode
+
 **v2.8.0** - Full Debug Session Support
 - **DebuggerAttach/Detach** - Attach to caught debuggees, release sessions
 - **DebuggerGetStack** - View call stack with program/line info
@@ -26,7 +38,7 @@
 
 A Go-native MCP (Model Context Protocol) server for SAP ABAP Development Tools (ADT).
 
-**Single binary** with **37 focused tools** (default) or **74 expert tools** for AI-assisted ABAP development.
+**Single binary** with **41 focused tools** (default) or **68 expert tools** for AI-assisted ABAP development.
 
 ## Key Features
 
