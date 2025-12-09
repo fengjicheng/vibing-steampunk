@@ -11,6 +11,11 @@
 
 ## What's New
 
+**v2.12.5** - EditSource Line Ending Fix
+- **CRLF→LF Normalization**: EditSource now works reliably across platforms
+- SAP ADT returns `\r\n`, AI sends `\n` - now automatically normalized
+- No more "old_string not found" errors due to line ending mismatches
+
 **v2.12.4** - Feature Detection & Safety Network
 - **GetFeatures Tool**: Probe SAP system for available optional capabilities
 - **Feature Flags**: `--feature-abapgit`, `--feature-rap`, `--feature-amdp`, `--feature-ui5`, `--feature-transport`
