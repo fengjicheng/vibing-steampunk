@@ -24,10 +24,16 @@ type SyntaxCheckResult struct {
 
 // SyntaxCheck performs syntax check on ABAP source code.
 // objectURL is the ADT URL of the object (e.g., "/sap/bc/adt/programs/programs/ZTEST")
+// For class includes (e.g., "/sap/bc/adt/oo/classes/ZCL_FOO/includes/testclasses"),
+// pass the include URL directly - no /source/main suffix will be added.
 // content is the source code to check
 func (c *Client) SyntaxCheck(ctx context.Context, objectURL string, content string) ([]SyntaxCheckResult, error) {
 	// Build the request body
-	sourceURL := objectURL + "/source/main"
+	// For class includes, the URL is used as-is (no /source/main suffix)
+	sourceURL := objectURL
+	if !strings.Contains(objectURL, "/includes/") {
+		sourceURL = objectURL + "/source/main"
+	}
 	encodedContent := base64.StdEncoding.EncodeToString([]byte(content))
 
 	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>

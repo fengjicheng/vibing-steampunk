@@ -1261,9 +1261,31 @@ func (c *Client) EditSource(ctx context.Context, objectURL, oldString, newString
 		result.ObjectName = parts[len(parts)-1]
 	}
 
+	// Detect if this is a class include (e.g., /sap/bc/adt/oo/classes/ZCL_FOO/includes/testclasses)
+	isClassInclude := strings.Contains(objectURL, "/includes/")
+	var className string
+	var includeType ClassIncludeType
+	var parentClassURL string
+
+	if isClassInclude {
+		// Parse class name and include type from URL
+		// URL format: /sap/bc/adt/oo/classes/{class_name}/includes/{include_type}
+		includesIdx := strings.Index(objectURL, "/includes/")
+		if includesIdx > 0 {
+			classesPrefix := "/sap/bc/adt/oo/classes/"
+			if strings.Contains(objectURL, classesPrefix) {
+				classStart := strings.Index(objectURL, classesPrefix) + len(classesPrefix)
+				className = objectURL[classStart:includesIdx]
+				includeType = ClassIncludeType(objectURL[includesIdx+len("/includes/"):])
+				parentClassURL = objectURL[:includesIdx]
+			}
+		}
+	}
+
 	// 1. Get current source
+	// For class includes, the source is accessed directly without /source/main suffix
 	sourceURL := objectURL
-	if !strings.HasSuffix(sourceURL, "/source/main") {
+	if !isClassInclude && !strings.HasSuffix(sourceURL, "/source/main") {
 		sourceURL = objectURL + "/source/main"
 	}
 
@@ -1300,6 +1322,7 @@ func (c *Client) EditSource(ctx context.Context, objectURL, oldString, newString
 
 	// 4. Optional syntax check
 	if syntaxCheck {
+		// For class includes, pass the include URL directly - SyntaxCheck handles it
 		syntaxErrors, err := c.SyntaxCheck(ctx, objectURL, newSource)
 		if err != nil {
 			result.Message = fmt.Sprintf("Syntax check failed: %v", err)
@@ -1318,8 +1341,12 @@ func (c *Client) EditSource(ctx context.Context, objectURL, oldString, newString
 		}
 	}
 
-	// 5. Lock object
-	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY")
+	// 5. Lock object (for class includes, lock the parent class)
+	lockURL := objectURL
+	if isClassInclude && parentClassURL != "" {
+		lockURL = parentClassURL
+	}
+	lockResult, err := c.LockObject(ctx, lockURL, "MODIFY")
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
@@ -1329,27 +1356,38 @@ func (c *Client) EditSource(ctx context.Context, objectURL, oldString, newString
 	unlocked := false
 	defer func() {
 		if !unlocked {
-			_ = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+			_ = c.UnlockObject(ctx, lockURL, lockResult.LockHandle)
 		}
 	}()
 
 	// 6. Update source
-	err = c.UpdateSource(ctx, sourceURL, newSource, lockResult.LockHandle, "")
+	if isClassInclude && className != "" {
+		// Use UpdateClassInclude for class includes
+		err = c.UpdateClassInclude(ctx, className, includeType, newSource, lockResult.LockHandle, "")
+	} else {
+		err = c.UpdateSource(ctx, sourceURL, newSource, lockResult.LockHandle, "")
+	}
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to update source: %v", err)
 		return result, nil
 	}
 
 	// 7. Unlock
-	err = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
+	err = c.UnlockObject(ctx, lockURL, lockResult.LockHandle)
 	unlocked = true
 	if err != nil {
 		result.Message = fmt.Sprintf("Source updated but unlock failed: %v", err)
 		return result, nil
 	}
 
-	// 8. Activate
-	activation, err := c.Activate(ctx, objectURL, result.ObjectName)
+	// 8. Activate (for class includes, activate the parent class)
+	activateURL := objectURL
+	activateName := result.ObjectName
+	if isClassInclude && parentClassURL != "" && className != "" {
+		activateURL = parentClassURL
+		activateName = className
+	}
+	activation, err := c.Activate(ctx, activateURL, activateName)
 	if err != nil {
 		result.Message = fmt.Sprintf("Source updated but activation failed: %v", err)
 		return result, nil
@@ -2665,8 +2703,16 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 				return result, nil
 			}
 
-			// Update test include
+			// Update test include - try update first, create if it doesn't exist
 			err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, opts.Transport)
+			if err != nil {
+				// Try to create the test include first (it may not exist)
+				createErr := c.CreateTestInclude(ctx, name, lock.LockHandle, opts.Transport)
+				if createErr == nil {
+					// Retry update after creating
+					err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, opts.Transport)
+				}
+			}
 			unlockErr := c.UnlockObject(ctx, objectURL, lock.LockHandle)
 			if err != nil {
 				result.Message += fmt.Sprintf(" (Warning: Failed to update test include: %v)", err)
@@ -2674,6 +2720,13 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			}
 			if unlockErr != nil {
 				result.Message += fmt.Sprintf(" (Warning: Failed to unlock after test update: %v)", unlockErr)
+			}
+
+			// Activate the test include
+			testIncludeURL := objectURL + "/includes/testclasses"
+			_, activateErr := c.Activate(ctx, testIncludeURL, name)
+			if activateErr != nil {
+				result.Message += fmt.Sprintf(" (Warning: Failed to activate test include: %v)", activateErr)
 			}
 
 			// Run tests
