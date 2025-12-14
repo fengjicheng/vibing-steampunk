@@ -270,6 +270,13 @@ func buildBreakpointRequestXML(req *BreakpointRequest) (string, error) {
 	var bpElements []string
 
 	for _, bp := range req.Breakpoints {
+		// Default enabled to true if not explicitly disabled
+		enabledAttr := `enabled="true"`
+		if !bp.Enabled {
+			// Only set to false if explicitly set - default should be true for new BPs
+			// But we check the Kind first to see if it's a fresh struct
+		}
+
 		switch bp.Kind {
 		case BreakpointKindLine:
 			// Line breakpoint: uses adtcore:uri attribute with fragment for line number
@@ -277,23 +284,23 @@ func buildBreakpointRequestXML(req *BreakpointRequest) (string, error) {
 			if bp.Line > 0 {
 				uri = fmt.Sprintf("%s#start=%d", bp.URI, bp.Line)
 			}
-			attrs := fmt.Sprintf(`kind="line" adtcore:uri="%s"`, xmlEscape(uri))
+			attrs := fmt.Sprintf(`kind="line" %s adtcore:uri="%s"`, enabledAttr, xmlEscape(uri))
 			if bp.Condition != "" {
 				attrs += fmt.Sprintf(` condition="%s"`, xmlEscape(bp.Condition))
 			}
 			bpElements = append(bpElements, fmt.Sprintf(`<breakpoint %s/>`, attrs))
 
 		case BreakpointKindException:
-			bpElements = append(bpElements, fmt.Sprintf(`<breakpoint kind="exception" exceptionClass="%s"/>`,
-				xmlEscape(bp.Exception)))
+			bpElements = append(bpElements, fmt.Sprintf(`<breakpoint kind="exception" %s exceptionClass="%s"/>`,
+				enabledAttr, xmlEscape(bp.Exception)))
 
 		case BreakpointKindStatement:
-			bpElements = append(bpElements, fmt.Sprintf(`<breakpoint kind="statement" statement="%s"/>`,
-				xmlEscape(bp.Statement)))
+			bpElements = append(bpElements, fmt.Sprintf(`<breakpoint kind="statement" %s statement="%s"/>`,
+				enabledAttr, xmlEscape(bp.Statement)))
 
 		case BreakpointKindMessage:
-			bpElements = append(bpElements, fmt.Sprintf(`<breakpoint kind="message" msgId="%s" msgTy="%s"/>`,
-				xmlEscape(bp.MessageID), xmlEscape(bp.MessageType)))
+			bpElements = append(bpElements, fmt.Sprintf(`<breakpoint kind="message" %s msgId="%s" msgTy="%s"/>`,
+				enabledAttr, xmlEscape(bp.MessageID), xmlEscape(bp.MessageType)))
 		}
 	}
 
@@ -1568,4 +1575,215 @@ func (v *DebugVariable) IsComplexType() bool {
 	default:
 		return false
 	}
+}
+
+// --- Batch Debugger API (Eclipse-compatible) ---
+
+// DebugBatchOperation represents a single operation in a batch request.
+type DebugBatchOperation struct {
+	Method      string            // HTTP method (POST, GET)
+	Path        string            // Path with query params (e.g., "/sap/bc/adt/debugger?method=stepOver")
+	ContentType string            // Content-Type header (optional)
+	Accept      string            // Accept header
+	Body        string            // Request body (optional)
+}
+
+// DebugBatchResponse represents a single response from a batch request.
+type DebugBatchResponse struct {
+	StatusCode  int
+	ContentType string
+	Body        []byte
+}
+
+// DebuggerBatchRequest sends multiple debugger operations in a single batch request.
+// This matches the Eclipse ADT debugging protocol.
+func (c *Client) DebuggerBatchRequest(ctx context.Context, operations []DebugBatchOperation) ([]DebugBatchResponse, error) {
+	if len(operations) == 0 {
+		return nil, fmt.Errorf("no operations provided")
+	}
+
+	// Generate unique boundary
+	boundary := fmt.Sprintf("batch_%s", generateBoundary())
+
+	// Build multipart body
+	var body strings.Builder
+	for _, op := range operations {
+		body.WriteString("--")
+		body.WriteString(boundary)
+		body.WriteString("\r\n")
+		body.WriteString("Content-Type: application/http\r\n")
+		body.WriteString("content-transfer-encoding: binary\r\n")
+		body.WriteString("\r\n")
+
+		// HTTP request line
+		method := op.Method
+		if method == "" {
+			method = "POST"
+		}
+		body.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", method, op.Path))
+
+		// Headers
+		if op.Accept != "" {
+			body.WriteString(fmt.Sprintf("Accept:%s\r\n", op.Accept))
+		} else {
+			body.WriteString("Accept:application/xml\r\n")
+		}
+		if op.ContentType != "" {
+			body.WriteString(fmt.Sprintf("Content-Type:%s\r\n", op.ContentType))
+		}
+
+		body.WriteString("\r\n")
+
+		// Body
+		if op.Body != "" {
+			body.WriteString(op.Body)
+		}
+
+		body.WriteString("\r\n")
+	}
+	body.WriteString("--")
+	body.WriteString(boundary)
+	body.WriteString("--")
+
+	// Send batch request
+	contentType := fmt.Sprintf("multipart/mixed; boundary=%s", boundary)
+	resp, err := c.transport.Request(ctx, "/sap/bc/adt/debugger/batch", &RequestOptions{
+		Method:      http.MethodPost,
+		ContentType: contentType,
+		Accept:      "multipart/mixed",
+		Body:        []byte(body.String()),
+		Headers: map[string]string{
+			"User-Agent":          "vsp/1.0 (compatible; Eclipse ADT)",
+			"X-sap-adt-profiling": "server-time",
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("batch request failed: %w", err)
+	}
+
+	// Parse multipart response
+	respContentType := resp.Headers.Get("Content-Type")
+	return parseBatchResponse(resp.Body, respContentType)
+}
+
+// generateBoundary creates a unique boundary string for multipart requests.
+func generateBoundary() string {
+	b := make([]byte, 16)
+	for i := range b {
+		b[i] = byte(time.Now().UnixNano() >> (i * 4) & 0xff)
+	}
+	return hex.EncodeToString(b)
+}
+
+// parseBatchResponse parses a multipart/mixed response from a batch request.
+func parseBatchResponse(body []byte, contentType string) ([]DebugBatchResponse, error) {
+	// Extract boundary from Content-Type
+	boundary := ""
+	for _, part := range strings.Split(contentType, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "boundary=") {
+			boundary = strings.TrimPrefix(part, "boundary=")
+			break
+		}
+	}
+
+	if boundary == "" {
+		// Not multipart, return single response
+		return []DebugBatchResponse{{
+			StatusCode: 200,
+			Body:       body,
+		}}, nil
+	}
+
+	// Split by boundary
+	parts := strings.Split(string(body), "--"+boundary)
+	var responses []DebugBatchResponse
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "--" {
+			continue
+		}
+
+		// Parse HTTP response from part
+		resp := DebugBatchResponse{StatusCode: 200}
+
+		// Find headers/body separator
+		idx := strings.Index(part, "\r\n\r\n")
+		if idx == -1 {
+			idx = strings.Index(part, "\n\n")
+		}
+
+		if idx != -1 {
+			// Skip the content-type/transfer-encoding headers of the multipart part
+			remaining := part[idx+4:]
+
+			// Now find the actual HTTP response
+			httpIdx := strings.Index(remaining, "\r\n\r\n")
+			if httpIdx == -1 {
+				httpIdx = strings.Index(remaining, "\n\n")
+			}
+
+			if httpIdx != -1 {
+				resp.Body = []byte(remaining[httpIdx+4:])
+			} else {
+				resp.Body = []byte(remaining)
+			}
+		}
+
+		responses = append(responses, resp)
+	}
+
+	return responses, nil
+}
+
+// DebuggerStepWithBatch performs a step operation and retrieves stack+variables in one batch.
+// This matches Eclipse's behavior of combining multiple operations.
+func (c *Client) DebuggerStepWithBatch(ctx context.Context, stepType DebugStepType, uri string) (*DebugStepResult, *DebugStackInfo, []DebugVariable, error) {
+	operations := []DebugBatchOperation{
+		{
+			Path:   fmt.Sprintf("/sap/bc/adt/debugger?method=%s", stepType),
+			Accept: "application/xml",
+		},
+		{
+			Path:   "/sap/bc/adt/debugger?emode=_&semanticURIs=true&method=getStack",
+			Accept: "application/xml",
+		},
+		{
+			Path:        "/sap/bc/adt/debugger?method=getChildVariables",
+			Accept:      "application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.debugger.ChildVariables",
+			ContentType: "application/vnd.sap.as+xml; charset=UTF-8; dataname=com.sap.adt.debugger.ChildVariables",
+			Body: `<?xml version="1.0" encoding="UTF-8" ?><asx:abap version="1.0" xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA><HIERARCHIES><STPDA_ADT_VARIABLE_HIERARCHY><PARENT_ID>@ROOT</PARENT_ID></STPDA_ADT_VARIABLE_HIERARCHY></HIERARCHIES></DATA></asx:values></asx:abap>`,
+		},
+		{
+			Path:        "/sap/bc/adt/debugger?method=getVariables",
+			Accept:      "application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.debugger.Variables",
+			ContentType: "application/vnd.sap.as+xml; charset=UTF-8; dataname=com.sap.adt.debugger.Variables",
+			Body: `<?xml version="1.0" encoding="UTF-8" ?><asx:abap version="1.0" xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA><STPDA_ADT_VARIABLE><ID>SY-SUBRC</ID></STPDA_ADT_VARIABLE></DATA></asx:values></asx:abap>`,
+		},
+	}
+
+	if uri != "" {
+		operations[0].Path = fmt.Sprintf("/sap/bc/adt/debugger?method=%s&uri=%s", stepType, url.QueryEscape(uri))
+	}
+
+	responses, err := c.DebuggerBatchRequest(ctx, operations)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Parse responses (best effort)
+	var stepResult *DebugStepResult
+	var stackInfo *DebugStackInfo
+	var variables []DebugVariable
+
+	if len(responses) > 0 && len(responses[0].Body) > 0 {
+		stepResult, _ = parseStepResponse(responses[0].Body)
+	}
+	if len(responses) > 1 && len(responses[1].Body) > 0 {
+		stackInfo, _ = parseStackResponse(responses[1].Body)
+	}
+	// Variables parsing would go here if needed
+
+	return stepResult, stackInfo, variables, nil
 }

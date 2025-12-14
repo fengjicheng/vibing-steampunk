@@ -374,7 +374,7 @@ When creating a new report:
 | **ABAP Profiler** | ✅ Complete (ListTraces, GetTrace - ATRA) |
 | **SQL Trace** | ✅ Complete (GetSQLTraceState, ListSQLTraces - ST05) |
 | **RAP OData E2E** | ✅ Complete (DDLS, SRVD, SRVB create + publish) |
-| **External Debugger** | ✅ Complete (Breakpoints, Debug Listener, Debuggee parsing) |
+| **External Debugger** | ⚠️ Limited (Breakpoints persist, listener works, but HTTP triggers unreliable - see report 2025-12-14-002) |
 | **AMDP Debugger** | ⚠️ Experimental (Session works, breakpoints need investigation - expert mode only) |
 | **Transport Mgmt** | ✅ Complete (5 tools with safety controls - v2.11.0) |
 | **UI5/BSP Mgmt** | ✅ Partial (Read ops work; Create needs alternate API) |
