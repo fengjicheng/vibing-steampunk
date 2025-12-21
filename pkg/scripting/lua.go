@@ -178,6 +178,12 @@ History Navigation:
   loadRecording(id, [path])       Load a saved recording
   compareRecordings(id1, id2)     Compare two recordings
 
+Force Replay (Phase 5.5) - THE KILLER FEATURE:
+  setVariable(name, value)        Modify variable in live session
+  injectCheckpoint(name)          Inject all vars from checkpoint
+  forceReplay(recordingId, [step]) Inject state from saved recording
+  replayFromStep(stepNumber)      Inject state from current recording
+
 Utilities:
   print(...)                      Print values
   sleep(seconds)                  Sleep for N seconds

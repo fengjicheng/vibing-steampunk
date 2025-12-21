@@ -115,10 +115,10 @@ type ExecutionFrame struct {
 **Effort:** 1 week
 
 #### 5.5 Force Replay (State Injection)
-- [ ] SetVariable API (modify variables in live session)
-- [ ] InjectCheckpoint (restore all variables from checkpoint)
-- [ ] ForceReplay (inject state from recording at specific step)
-- [ ] Validation and audit logging
+- [x] SetVariable API (modify variables in live session)
+- [x] InjectCheckpoint (restore all variables from checkpoint)
+- [x] ForceReplay (inject state from recording at specific step)
+- [x] ReplayFromStep (inject state from current recording)
 
 **Effort:** 1 week
 

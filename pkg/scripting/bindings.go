@@ -2,6 +2,7 @@ package scripting
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/oisee/vibing-steampunk/pkg/adt"
@@ -69,6 +70,10 @@ func (e *LuaEngine) registerADTBindings() {
 	e.L.SetGlobal("listRecordings", e.L.NewFunction(e.luaListRecordings))
 	e.L.SetGlobal("loadRecording", e.L.NewFunction(e.luaLoadRecording))
 	e.L.SetGlobal("compareRecordings", e.L.NewFunction(e.luaCompareRecordings))
+
+	// Force Replay (Phase 5.5)
+	e.L.SetGlobal("forceReplay", e.L.NewFunction(e.luaForceReplay))
+	e.L.SetGlobal("replayFromStep", e.L.NewFunction(e.luaReplayFromStep))
 
 	// Diagnostics
 	e.L.SetGlobal("getDumps", e.L.NewFunction(e.luaGetDumps))
@@ -688,16 +693,40 @@ func (e *LuaEngine) luaGetVariables(L *lua.LState) int {
 	return 1
 }
 
+// setVariable(name, value) - Modify variable value in live debug session (FORCE REPLAY!)
 func (e *LuaEngine) luaSetVariable(L *lua.LState) int {
 	name := getString(L, 1)
 	value := L.Get(2)
 
-	// TODO: Implement SetVariable in ADT client
-	_ = name
-	_ = value
+	// Convert Lua value to string for ADT API
+	var valueStr string
+	switch v := value.(type) {
+	case lua.LString:
+		valueStr = string(v)
+	case lua.LNumber:
+		valueStr = fmt.Sprintf("%v", float64(v))
+	case lua.LBool:
+		if v {
+			valueStr = "X" // ABAP true
+		} else {
+			valueStr = " " // ABAP false
+		}
+	default:
+		// For tables/complex types, serialize to JSON-like format
+		goVal := luaToGo(value)
+		jsonBytes, _ := jsonMarshal(goVal)
+		valueStr = string(jsonBytes)
+	}
 
-	L.Push(lua.LBool(false))
-	L.Push(lua.LString("SetVariable not yet implemented in ADT client"))
+	result, err := e.client.DebuggerSetVariableValue(e.ctx, name, valueStr)
+	if err != nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(lua.LBool(true))
+	L.Push(lua.LString(result))
 	return 2
 }
 
@@ -822,6 +851,7 @@ func (e *LuaEngine) luaListCheckpoints(L *lua.LState) int {
 	return 1
 }
 
+// injectCheckpoint(name) - Inject all variables from checkpoint into live debug session (FORCE REPLAY!)
 func (e *LuaEngine) luaInjectCheckpoint(L *lua.LState) int {
 	name := getString(L, 1)
 
@@ -832,18 +862,53 @@ func (e *LuaEngine) luaInjectCheckpoint(L *lua.LState) int {
 		return 2
 	}
 
-	// TODO: Implement SetVariable for each variable
-	// For now, just report what would be injected
-	count := 0
-	for varName := range checkpoint {
-		if varName != "_timestamp" {
-			count++
-			fmt.Fprintf(e.output, "Would inject: %s\n", varName)
+	// Inject each variable from checkpoint
+	injected := 0
+	failed := 0
+	var lastError string
+
+	for varName, value := range checkpoint {
+		// Skip metadata fields
+		if strings.HasPrefix(varName, "_") {
+			continue
+		}
+
+		// Convert value to string
+		var valueStr string
+		switch v := value.(type) {
+		case string:
+			valueStr = v
+		case float64:
+			valueStr = fmt.Sprintf("%v", v)
+		case bool:
+			if v {
+				valueStr = "X"
+			} else {
+				valueStr = " "
+			}
+		default:
+			jsonBytes, _ := jsonMarshal(v)
+			valueStr = string(jsonBytes)
+		}
+
+		_, err := e.client.DebuggerSetVariableValue(e.ctx, varName, valueStr)
+		if err != nil {
+			failed++
+			lastError = fmt.Sprintf("%s: %v", varName, err)
+			fmt.Fprintf(e.output, "Failed to inject %s: %v\n", varName, err)
+		} else {
+			injected++
+			fmt.Fprintf(e.output, "Injected: %s = %s\n", varName, valueStr)
 		}
 	}
 
-	L.Push(lua.LBool(true))
-	L.Push(lua.LNumber(count))
+	if failed > 0 {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(fmt.Sprintf("Injected %d, failed %d. Last error: %s", injected, failed, lastError)))
+	} else {
+		L.Push(lua.LBool(true))
+		L.Push(lua.LNumber(injected))
+	}
 	return 2
 }
 
@@ -1252,4 +1317,132 @@ func (e *LuaEngine) luaCompareRecordings(L *lua.LState) int {
 
 	L.Push(tbl)
 	return 1
+}
+
+// --- Force Replay (Phase 5.5) ---
+
+// forceReplay(recordingId, [stepNumber]) - Inject state from recording into live debug session
+// This is the killer feature: inject production state into dev session for debugging!
+func (e *LuaEngine) luaForceReplay(L *lua.LState) int {
+	recordingID := getString(L, 1)
+	stepNumber := getOptInt(L, 2, -1) // -1 means last step
+	storePath := getOptString(L, 3, ".vsp-recordings")
+
+	// Initialize history manager if needed
+	if e.historyManager == nil {
+		var err error
+		e.historyManager, err = adt.NewHistoryManager(storePath)
+		if err != nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+	}
+
+	// Load the recording
+	recording, err := e.historyManager.LoadRecording(recordingID)
+	if err != nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString("recording not found: " + err.Error()))
+		return 2
+	}
+
+	// Default to last step
+	if stepNumber == -1 {
+		stepNumber = recording.TotalSteps
+	}
+
+	if stepNumber < 1 || stepNumber > recording.TotalSteps {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(fmt.Sprintf("invalid step %d (recording has %d steps)", stepNumber, recording.TotalSteps)))
+		return 2
+	}
+
+	// Get variables at the target step
+	frame := recording.Frames[stepNumber-1]
+	vars := frame.Variables
+	if vars == nil {
+		vars = frame.VariableDelta
+	}
+
+	// Inject each variable
+	injected := 0
+	failed := 0
+	var lastError string
+
+	fmt.Fprintf(e.output, "Force Replay: Injecting state from %s step %d\n", recordingID, stepNumber)
+	fmt.Fprintf(e.output, "Location: %s:%d\n", frame.Location.Program, frame.Location.Line)
+
+	for _, v := range vars {
+		if v.Name == "" {
+			continue
+		}
+
+		valueStr := fmt.Sprintf("%v", v.Value)
+		_, err := e.client.DebuggerSetVariableValue(e.ctx, v.Name, valueStr)
+		if err != nil {
+			failed++
+			lastError = fmt.Sprintf("%s: %v", v.Name, err)
+			// Don't spam output for read-only vars
+			if !strings.Contains(err.Error(), "read-only") {
+				fmt.Fprintf(e.output, "  Failed: %s = %s (%v)\n", v.Name, valueStr, err)
+			}
+		} else {
+			injected++
+			fmt.Fprintf(e.output, "  Injected: %s = %s\n", v.Name, valueStr)
+		}
+	}
+
+	fmt.Fprintf(e.output, "\nResult: %d injected, %d failed\n", injected, failed)
+
+	if injected == 0 && failed > 0 {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(lastError))
+	} else {
+		L.Push(lua.LBool(true))
+		L.Push(lua.LNumber(injected))
+	}
+	return 2
+}
+
+// replayFromStep(stepNumber) - Inject state from current recording at specific step
+func (e *LuaEngine) luaReplayFromStep(L *lua.LState) int {
+	stepNumber := int(L.ToNumber(1))
+
+	if e.recorder == nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString("no active recording"))
+		return 2
+	}
+
+	// Get variables at the target step
+	vars := e.recorder.GetVariablesAtStep(stepNumber)
+	if vars == nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(fmt.Sprintf("step %d not found in current recording", stepNumber)))
+		return 2
+	}
+
+	// Inject each variable
+	injected := 0
+	failed := 0
+
+	fmt.Fprintf(e.output, "Replay from step %d\n", stepNumber)
+
+	for name, v := range vars {
+		valueStr := fmt.Sprintf("%v", v.Value)
+		_, err := e.client.DebuggerSetVariableValue(e.ctx, name, valueStr)
+		if err != nil {
+			failed++
+		} else {
+			injected++
+			fmt.Fprintf(e.output, "  %s = %s\n", name, valueStr)
+		}
+	}
+
+	fmt.Fprintf(e.output, "Result: %d injected, %d failed\n", injected, failed)
+
+	L.Push(lua.LBool(true))
+	L.Push(lua.LNumber(injected))
+	return 2
 }
