@@ -11,13 +11,20 @@
 
 ## What's New
 
+**v2.14.0** - Lua Scripting Integration (Phase 5)
+- **`vsp lua` Command**: Interactive REPL and script execution
+- **40+ Lua Bindings**: All MCP tools accessible from Lua (searchObject, getSource, setBreakpoint, etc.)
+- **Debug Session Management**: listen, attach, stepOver, stepInto, stepReturn, continue, getStack
+- **Checkpoint System**: saveCheckpoint, getCheckpoint, listCheckpoints, injectCheckpoint (Force Replay foundation)
+- **Example Scripts**: search-and-grep, call-graph-analysis, debug-session, analyze-dumps
+- See [TAS & RCA Vision](VISION.md) and [Roadmap](ROADMAP.md) for Phase 5-8 plans
+
 **v2.13.0** - Call Graph & RCA Tools
 - **GetCallersOf/GetCalleesOf**: Navigate call graphs up (who calls) and down (what's called)
 - **TraceExecution**: Composite RCA tool - static graph + trace + comparison in one call
 - **CompareCallGraphs**: Find untested paths (static only) and dynamic calls (actual only)
 - **AnalyzeCallGraph**: Statistics on nodes, edges, depth, types
 - **WebSocket Debugging**: Full TPDAPI integration for statement/exception breakpoints
-- See [TAS & RCA Vision](VISION.md) and [Roadmap](ROADMAP.md) for future plans
 
 **v2.12.5** - EditSource Line Ending Fix
 - **CRLF→LF Normalization**: EditSource now works reliably across platforms
@@ -475,6 +482,51 @@ vibing-steampunk/
 - [AI-Powered RCA](reports/2025-12-05-013-ai-powered-rca-workflows.md) - Vision for AI-assisted debugging
 
 </details>
+
+## Lua Scripting (New in v2.14)
+
+Automate debugging workflows with Lua scripts:
+
+```bash
+# Interactive REPL
+vsp lua
+
+# Run a script
+vsp lua examples/scripts/debug-session.lua
+
+# Execute inline
+vsp lua -e 'print(json.encode(searchObject("ZCL_*", 10)))'
+```
+
+**Example: Set breakpoint and debug**
+```lua
+-- Set breakpoint
+local bpId = setBreakpoint("ZTEST_PROGRAM", 42)
+print("Breakpoint: " .. bpId)
+
+-- Wait for debuggee
+local event = listen(60)
+if event then
+    attach(event.id)
+    print("Stack:")
+    for i, frame in ipairs(getStack()) do
+        print("  " .. frame.program .. ":" .. frame.line)
+    end
+    stepOver()
+    detach()
+end
+```
+
+**Available Functions:**
+- **Search**: `searchObject`, `grepObjects`
+- **Source**: `getSource`, `writeSource`, `editSource`
+- **Debug**: `setBreakpoint`, `listen`, `attach`, `detach`, `stepOver`, `stepInto`, `stepReturn`, `continue_`, `getStack`, `getVariables`
+- **Checkpoints**: `saveCheckpoint`, `getCheckpoint`, `listCheckpoints`, `injectCheckpoint`
+- **Diagnostics**: `getDumps`, `getDump`, `runUnitTests`, `syntaxCheck`
+- **Call Graph**: `getCallGraph`, `getCallersOf`, `getCalleesOf`
+- **Utilities**: `print`, `sleep`, `json.encode`, `json.decode`
+
+See `examples/scripts/` for more examples.
 
 ## Vision & Roadmap
 

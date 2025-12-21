@@ -60,10 +60,10 @@
 **Goal:** Scriptable, replayable debugging inspired by Tool-Assisted Speedruns.
 
 #### 5.1 Lua Scripting Integration
-- [ ] Integrate gopher-lua into vsp
-- [ ] Expose all MCP tools to Lua
-- [ ] Create Lua REPL for interactive debugging
-- [ ] Document scripting API
+- [x] Integrate gopher-lua into vsp
+- [x] Expose all MCP tools to Lua
+- [x] Create Lua REPL for interactive debugging
+- [ ] Document scripting API (examples created)
 
 ```lua
 -- Target API

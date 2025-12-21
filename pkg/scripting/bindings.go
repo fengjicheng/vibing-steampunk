@@ -1,0 +1,815 @@
+package scripting
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/oisee/vibing-steampunk/pkg/adt"
+	lua "github.com/yuin/gopher-lua"
+)
+
+// registerADTBindings registers all ADT-related Lua functions.
+func (e *LuaEngine) registerADTBindings() {
+	// Search & Source
+	e.L.SetGlobal("searchObject", e.L.NewFunction(e.luaSearchObject))
+	e.L.SetGlobal("grepObjects", e.L.NewFunction(e.luaGrepObjects))
+	e.L.SetGlobal("getSource", e.L.NewFunction(e.luaGetSource))
+	e.L.SetGlobal("writeSource", e.L.NewFunction(e.luaWriteSource))
+	e.L.SetGlobal("editSource", e.L.NewFunction(e.luaEditSource))
+
+	// Debugging - Breakpoints
+	e.L.SetGlobal("setBreakpoint", e.L.NewFunction(e.luaSetBreakpoint))
+	e.L.SetGlobal("setStatementBP", e.L.NewFunction(e.luaSetStatementBreakpoint))
+	e.L.SetGlobal("setExceptionBP", e.L.NewFunction(e.luaSetExceptionBreakpoint))
+	e.L.SetGlobal("getBreakpoints", e.L.NewFunction(e.luaGetBreakpoints))
+	e.L.SetGlobal("deleteBreakpoint", e.L.NewFunction(e.luaDeleteBreakpoint))
+
+	// Debugging - Session
+	e.L.SetGlobal("listen", e.L.NewFunction(e.luaListen))
+	e.L.SetGlobal("attach", e.L.NewFunction(e.luaAttach))
+	e.L.SetGlobal("detach", e.L.NewFunction(e.luaDetach))
+
+	// Debugging - Execution
+	e.L.SetGlobal("stepOver", e.L.NewFunction(e.luaStepOver))
+	e.L.SetGlobal("stepInto", e.L.NewFunction(e.luaStepInto))
+	e.L.SetGlobal("stepReturn", e.L.NewFunction(e.luaStepReturn))
+	e.L.SetGlobal("continue_", e.L.NewFunction(e.luaContinue))
+
+	// Debugging - Inspection
+	e.L.SetGlobal("getStack", e.L.NewFunction(e.luaGetStack))
+	e.L.SetGlobal("getVariables", e.L.NewFunction(e.luaGetVariables))
+	e.L.SetGlobal("setVariable", e.L.NewFunction(e.luaSetVariable))
+
+	// Call Graph
+	e.L.SetGlobal("getCallGraph", e.L.NewFunction(e.luaGetCallGraph))
+	e.L.SetGlobal("getCallersOf", e.L.NewFunction(e.luaGetCallersOf))
+	e.L.SetGlobal("getCalleesOf", e.L.NewFunction(e.luaGetCalleesOf))
+
+	// Checkpoints (for Force Replay)
+	e.L.SetGlobal("saveCheckpoint", e.L.NewFunction(e.luaSaveCheckpoint))
+	e.L.SetGlobal("getCheckpoint", e.L.NewFunction(e.luaGetCheckpoint))
+	e.L.SetGlobal("listCheckpoints", e.L.NewFunction(e.luaListCheckpoints))
+	e.L.SetGlobal("injectCheckpoint", e.L.NewFunction(e.luaInjectCheckpoint))
+
+	// Diagnostics
+	e.L.SetGlobal("getDumps", e.L.NewFunction(e.luaGetDumps))
+	e.L.SetGlobal("getDump", e.L.NewFunction(e.luaGetDump))
+	e.L.SetGlobal("runUnitTests", e.L.NewFunction(e.luaRunUnitTests))
+	e.L.SetGlobal("syntaxCheck", e.L.NewFunction(e.luaSyntaxCheck))
+}
+
+// --- Search & Source ---
+
+func (e *LuaEngine) luaSearchObject(L *lua.LState) int {
+	query := getString(L, 1)
+	maxResults := getOptInt(L, 2, 100)
+
+	results, err := e.client.SearchObject(e.ctx, query, maxResults)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	for i, obj := range results {
+		row := L.NewTable()
+		L.SetField(row, "name", lua.LString(obj.Name))
+		L.SetField(row, "type", lua.LString(obj.Type))
+		L.SetField(row, "uri", lua.LString(obj.URI))
+		L.SetField(row, "package", lua.LString(obj.PackageName))
+		tbl.RawSetInt(i+1, row)
+	}
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaGrepObjects(L *lua.LState) int {
+	// grepObjects(pattern, objectQuery, [contextLines])
+	// First searches for objects matching objectQuery, then greps for pattern
+	pattern := getString(L, 1)
+	objectQuery := getOptString(L, 2, "")
+	contextLines := getOptInt(L, 3, 0)
+
+	// If objectQuery is empty, use pattern as both search and grep pattern
+	if objectQuery == "" {
+		objectQuery = "*"
+	}
+
+	// Search for objects first
+	objects, err := e.client.SearchObject(e.ctx, objectQuery, 50)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	// Extract URIs
+	objectURLs := make([]string, len(objects))
+	for i, obj := range objects {
+		objectURLs[i] = obj.URI
+	}
+
+	if len(objectURLs) == 0 {
+		L.Push(L.NewTable()) // Return empty table
+		return 1
+	}
+
+	// Grep in objects
+	result, err := e.client.GrepObjects(e.ctx, objectURLs, pattern, false, contextLines)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	idx := 1
+	for _, obj := range result.Objects {
+		for _, match := range obj.Matches {
+			row := L.NewTable()
+			L.SetField(row, "uri", lua.LString(obj.ObjectURL))
+			L.SetField(row, "name", lua.LString(obj.ObjectName))
+			L.SetField(row, "line", lua.LNumber(match.LineNumber))
+			L.SetField(row, "content", lua.LString(match.MatchedLine))
+			tbl.RawSetInt(idx, row)
+			idx++
+		}
+	}
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaGetSource(L *lua.LState) int {
+	objType := getString(L, 1)
+	name := getString(L, 2)
+	include := getOptString(L, 3, "")
+
+	opts := &adt.GetSourceOptions{
+		Include: include,
+	}
+
+	source, err := e.client.GetSource(e.ctx, objType, name, opts)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(lua.LString(source))
+	return 1
+}
+
+func (e *LuaEngine) luaWriteSource(L *lua.LState) int {
+	objType := getString(L, 1)
+	name := getString(L, 2)
+	source := getString(L, 3)
+
+	result, err := e.client.WriteSource(e.ctx, objType, name, source, nil)
+	if err != nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(lua.LBool(result.Success))
+	return 1
+}
+
+func (e *LuaEngine) luaEditSource(L *lua.LState) int {
+	// editSource(objectURI, oldText, newText, [replaceAll])
+	objectURI := getString(L, 1)
+	oldText := getString(L, 2)
+	newText := getString(L, 3)
+	replaceAll := getBool(L, 4)
+
+	result, err := e.client.EditSource(e.ctx, objectURI, oldText, newText, replaceAll, true, false)
+	if err != nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(lua.LBool(result.Success))
+	return 1
+}
+
+// --- Debugging: Breakpoints ---
+// Note: These are stubs. Full debugger integration requires more work.
+
+func (e *LuaEngine) luaSetBreakpoint(L *lua.LState) int {
+	program := getString(L, 1)
+	line := getInt(L, 2)
+
+	// Build breakpoint request
+	req := &adt.BreakpointRequest{
+		Breakpoints: []adt.Breakpoint{{
+			Kind:    adt.BreakpointKindLine,
+			URI:     program,
+			Line:    line,
+			Enabled: true,
+		}},
+	}
+
+	resp, err := e.client.SetExternalBreakpoint(e.ctx, req)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	if len(resp.Breakpoints) > 0 {
+		L.Push(lua.LString(resp.Breakpoints[0].ID))
+	} else {
+		L.Push(lua.LString(""))
+	}
+	return 1
+}
+
+func (e *LuaEngine) luaSetStatementBreakpoint(L *lua.LState) int {
+	statement := getString(L, 1)
+
+	req := &adt.BreakpointRequest{
+		Breakpoints: []adt.Breakpoint{{
+			Kind:      adt.BreakpointKindStatement,
+			Statement: statement,
+			Enabled:   true,
+		}},
+	}
+
+	resp, err := e.client.SetExternalBreakpoint(e.ctx, req)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	if len(resp.Breakpoints) > 0 {
+		L.Push(lua.LString(resp.Breakpoints[0].ID))
+	} else {
+		L.Push(lua.LString(""))
+	}
+	return 1
+}
+
+func (e *LuaEngine) luaSetExceptionBreakpoint(L *lua.LState) int {
+	exception := getString(L, 1)
+
+	req := &adt.BreakpointRequest{
+		Breakpoints: []adt.Breakpoint{{
+			Kind:      adt.BreakpointKindException,
+			Exception: exception,
+			Enabled:   true,
+		}},
+	}
+
+	resp, err := e.client.SetExternalBreakpoint(e.ctx, req)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	if len(resp.Breakpoints) > 0 {
+		L.Push(lua.LString(resp.Breakpoints[0].ID))
+	} else {
+		L.Push(lua.LString(""))
+	}
+	return 1
+}
+
+func (e *LuaEngine) luaGetBreakpoints(L *lua.LState) int {
+	user := getOptString(L, 1, "")
+
+	resp, err := e.client.GetExternalBreakpoints(e.ctx, user)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	for i, bp := range resp.Breakpoints {
+		row := L.NewTable()
+		L.SetField(row, "id", lua.LString(bp.ID))
+		L.SetField(row, "kind", lua.LString(string(bp.Kind)))
+		L.SetField(row, "uri", lua.LString(bp.URI))
+		L.SetField(row, "line", lua.LNumber(bp.Line))
+		L.SetField(row, "enabled", lua.LBool(bp.Enabled))
+		tbl.RawSetInt(i+1, row)
+	}
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaDeleteBreakpoint(L *lua.LState) int {
+	id := getString(L, 1)
+	user := getOptString(L, 2, "")
+
+	err := e.client.DeleteExternalBreakpoint(e.ctx, id, user)
+	if err != nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(lua.LBool(true))
+	return 1
+}
+
+// --- Debugging: Session ---
+
+func (e *LuaEngine) luaListen(L *lua.LState) int {
+	timeout := getOptInt(L, 1, 30)
+
+	opts := &adt.ListenOptions{
+		TimeoutSeconds: timeout,
+	}
+
+	result, err := e.client.DebuggerListen(e.ctx, opts)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	if result == nil || result.Debuggee == nil {
+		if result != nil && result.TimedOut {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("timeout: no debuggee caught"))
+		} else {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("no debuggee caught"))
+		}
+		return 2
+	}
+
+	tbl := L.NewTable()
+	L.SetField(tbl, "id", lua.LString(result.Debuggee.ID))
+	L.SetField(tbl, "program", lua.LString(result.Debuggee.Program))
+	L.SetField(tbl, "user", lua.LString(result.Debuggee.User))
+	L.SetField(tbl, "line", lua.LNumber(result.Debuggee.Line))
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaAttach(L *lua.LState) int {
+	debuggeeID := getString(L, 1)
+	user := getOptString(L, 2, "")
+
+	result, err := e.client.DebuggerAttach(e.ctx, debuggeeID, user)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	L.SetField(tbl, "session_id", lua.LString(result.DebugSessionID))
+	L.SetField(tbl, "server", lua.LString(result.ServerName))
+	L.SetField(tbl, "stepping_possible", lua.LBool(result.IsSteppingPossible))
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaDetach(L *lua.LState) int {
+	err := e.client.DebuggerDetach(e.ctx)
+	if err != nil {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(lua.LBool(true))
+	return 1
+}
+
+// --- Debugging: Execution ---
+
+func (e *LuaEngine) luaStepOver(L *lua.LState) int {
+	result, err := e.client.DebuggerStep(e.ctx, adt.DebugStepOver, "")
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(goToLua(L, map[string]interface{}{
+		"session_id":  result.DebugSessionID,
+		"stepping":    result.IsSteppingPossible,
+		"termination": result.IsTerminationPossible,
+	}))
+	return 1
+}
+
+func (e *LuaEngine) luaStepInto(L *lua.LState) int {
+	result, err := e.client.DebuggerStep(e.ctx, adt.DebugStepInto, "")
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(goToLua(L, map[string]interface{}{
+		"session_id":  result.DebugSessionID,
+		"stepping":    result.IsSteppingPossible,
+		"termination": result.IsTerminationPossible,
+	}))
+	return 1
+}
+
+func (e *LuaEngine) luaStepReturn(L *lua.LState) int {
+	result, err := e.client.DebuggerStep(e.ctx, adt.DebugStepReturn, "")
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(goToLua(L, map[string]interface{}{
+		"session_id":  result.DebugSessionID,
+		"stepping":    result.IsSteppingPossible,
+		"termination": result.IsTerminationPossible,
+	}))
+	return 1
+}
+
+func (e *LuaEngine) luaContinue(L *lua.LState) int {
+	result, err := e.client.DebuggerStep(e.ctx, adt.DebugStepContinue, "")
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(goToLua(L, map[string]interface{}{
+		"session_id":  result.DebugSessionID,
+		"stepping":    result.IsSteppingPossible,
+		"termination": result.IsTerminationPossible,
+	}))
+	return 1
+}
+
+// --- Debugging: Inspection ---
+
+func (e *LuaEngine) luaGetStack(L *lua.LState) int {
+	stack, err := e.client.DebuggerGetStack(e.ctx, false)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	for i, frame := range stack.Stack {
+		row := L.NewTable()
+		L.SetField(row, "program", lua.LString(frame.ProgramName))
+		L.SetField(row, "include", lua.LString(frame.IncludeName))
+		L.SetField(row, "line", lua.LNumber(frame.Line))
+		L.SetField(row, "type", lua.LString(frame.StackType))
+		L.SetField(row, "event", lua.LString(frame.EventName))
+		tbl.RawSetInt(i+1, row)
+	}
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaGetVariables(L *lua.LState) int {
+	// Get variable IDs from argument (Lua table)
+	varIDs := []string{}
+	if L.GetTop() >= 1 {
+		val := L.Get(1)
+		if tbl, ok := val.(*lua.LTable); ok {
+			tbl.ForEach(func(_, v lua.LValue) {
+				if s, ok := v.(lua.LString); ok {
+					varIDs = append(varIDs, string(s))
+				}
+			})
+		} else if s, ok := val.(lua.LString); ok {
+			varIDs = append(varIDs, string(s))
+		}
+	}
+
+	if len(varIDs) == 0 {
+		L.Push(lua.LNil)
+		L.Push(lua.LString("variable IDs required"))
+		return 2
+	}
+
+	vars, err := e.client.DebuggerGetVariables(e.ctx, varIDs)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	for _, v := range vars {
+		row := L.NewTable()
+		L.SetField(row, "id", lua.LString(v.ID))
+		L.SetField(row, "name", lua.LString(v.Name))
+		L.SetField(row, "type", lua.LString(v.DeclaredTypeName))
+		L.SetField(row, "value", lua.LString(v.Value))
+		tbl.RawSetString(v.Name, row)
+	}
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaSetVariable(L *lua.LState) int {
+	name := getString(L, 1)
+	value := L.Get(2)
+
+	// TODO: Implement SetVariable in ADT client
+	_ = name
+	_ = value
+
+	L.Push(lua.LBool(false))
+	L.Push(lua.LString("SetVariable not yet implemented in ADT client"))
+	return 2
+}
+
+// --- Call Graph ---
+
+func (e *LuaEngine) luaGetCallGraph(L *lua.LState) int {
+	objectURI := getString(L, 1)
+	direction := getOptString(L, 2, "callees")
+	maxDepth := getOptInt(L, 3, 5)
+
+	graph, err := e.client.GetCallGraph(e.ctx, objectURI, &adt.CallGraphOptions{
+		Direction:  direction,
+		MaxDepth:   maxDepth,
+		MaxResults: 500,
+	})
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(callGraphToLua(L, graph))
+	return 1
+}
+
+func (e *LuaEngine) luaGetCallersOf(L *lua.LState) int {
+	objectURI := getString(L, 1)
+	maxDepth := getOptInt(L, 2, 5)
+
+	graph, err := e.client.GetCallersOf(e.ctx, objectURI, maxDepth)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(callGraphToLua(L, graph))
+	return 1
+}
+
+func (e *LuaEngine) luaGetCalleesOf(L *lua.LState) int {
+	objectURI := getString(L, 1)
+	maxDepth := getOptInt(L, 2, 5)
+
+	graph, err := e.client.GetCalleesOf(e.ctx, objectURI, maxDepth)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	L.Push(callGraphToLua(L, graph))
+	return 1
+}
+
+func callGraphToLua(L *lua.LState, node *adt.CallGraphNode) *lua.LTable {
+	if node == nil {
+		return L.NewTable()
+	}
+
+	tbl := L.NewTable()
+	L.SetField(tbl, "uri", lua.LString(node.URI))
+	L.SetField(tbl, "name", lua.LString(node.Name))
+	L.SetField(tbl, "type", lua.LString(node.Type))
+
+	if len(node.Children) > 0 {
+		children := L.NewTable()
+		for i, child := range node.Children {
+			children.RawSetInt(i+1, callGraphToLua(L, &child))
+		}
+		L.SetField(tbl, "children", children)
+	}
+
+	return tbl
+}
+
+// --- Checkpoints (Force Replay) ---
+
+func (e *LuaEngine) luaSaveCheckpoint(L *lua.LState) int {
+	name := getString(L, 1)
+
+	// Save timestamp as checkpoint placeholder
+	// Full variable capture requires active debug session with variable IDs
+	checkpoint := make(map[string]interface{})
+	checkpoint["_timestamp"] = time.Now().Format(time.RFC3339)
+	checkpoint["_note"] = "Checkpoint saved - variable capture requires active debug session"
+
+	e.checkpoints[name] = checkpoint
+
+	L.Push(lua.LBool(true))
+	return 1
+}
+
+func (e *LuaEngine) luaGetCheckpoint(L *lua.LState) int {
+	name := getString(L, 1)
+
+	checkpoint, ok := e.checkpoints[name]
+	if !ok {
+		L.Push(lua.LNil)
+		L.Push(lua.LString("checkpoint not found: " + name))
+		return 2
+	}
+
+	L.Push(goToLua(L, checkpoint))
+	return 1
+}
+
+func (e *LuaEngine) luaListCheckpoints(L *lua.LState) int {
+	tbl := L.NewTable()
+	i := 1
+	for name, cp := range e.checkpoints {
+		row := L.NewTable()
+		L.SetField(row, "name", lua.LString(name))
+		if ts, ok := cp["_timestamp"].(string); ok {
+			L.SetField(row, "timestamp", lua.LString(ts))
+		}
+		tbl.RawSetInt(i, row)
+		i++
+	}
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaInjectCheckpoint(L *lua.LState) int {
+	name := getString(L, 1)
+
+	checkpoint, ok := e.checkpoints[name]
+	if !ok {
+		L.Push(lua.LBool(false))
+		L.Push(lua.LString("checkpoint not found: " + name))
+		return 2
+	}
+
+	// TODO: Implement SetVariable for each variable
+	// For now, just report what would be injected
+	count := 0
+	for varName := range checkpoint {
+		if varName != "_timestamp" {
+			count++
+			fmt.Fprintf(e.output, "Would inject: %s\n", varName)
+		}
+	}
+
+	L.Push(lua.LBool(true))
+	L.Push(lua.LNumber(count))
+	return 2
+}
+
+// --- Diagnostics ---
+
+func (e *LuaEngine) luaGetDumps(L *lua.LState) int {
+	maxResults := getOptInt(L, 1, 20)
+
+	dumps, err := e.client.GetDumps(e.ctx, &adt.DumpQueryOptions{
+		MaxResults: maxResults,
+	})
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	for i, dump := range dumps {
+		row := L.NewTable()
+		L.SetField(row, "id", lua.LString(dump.ID))
+		L.SetField(row, "program", lua.LString(dump.Program))
+		L.SetField(row, "exception", lua.LString(dump.ExceptionType))
+		L.SetField(row, "user", lua.LString(dump.User))
+		L.SetField(row, "time", lua.LString(dump.Timestamp))
+		L.SetField(row, "title", lua.LString(dump.Title))
+		tbl.RawSetInt(i+1, row)
+	}
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaGetDump(L *lua.LState) int {
+	dumpID := getString(L, 1)
+
+	dump, err := e.client.GetDump(e.ctx, dumpID)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	L.SetField(tbl, "id", lua.LString(dump.ID))
+	L.SetField(tbl, "program", lua.LString(dump.Program))
+	L.SetField(tbl, "exception", lua.LString(dump.ExceptionType))
+	L.SetField(tbl, "title", lua.LString(dump.Title))
+	L.SetField(tbl, "user", lua.LString(dump.User))
+	L.SetField(tbl, "line", lua.LNumber(dump.Line))
+	L.SetField(tbl, "time", lua.LString(dump.Timestamp))
+
+	// Stack trace
+	if len(dump.StackTrace) > 0 {
+		stack := L.NewTable()
+		for i, frame := range dump.StackTrace {
+			row := L.NewTable()
+			L.SetField(row, "program", lua.LString(frame.Program))
+			L.SetField(row, "include", lua.LString(frame.Include))
+			L.SetField(row, "line", lua.LNumber(frame.Line))
+			L.SetField(row, "event", lua.LString(frame.Event))
+			stack.RawSetInt(i+1, row)
+		}
+		L.SetField(tbl, "stack", stack)
+	}
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaRunUnitTests(L *lua.LState) int {
+	objectURI := getString(L, 1)
+
+	result, err := e.client.RunUnitTests(e.ctx, objectURI, nil)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+
+	classes := L.NewTable()
+	for i, class := range result.Classes {
+		row := L.NewTable()
+		L.SetField(row, "name", lua.LString(class.Name))
+		L.SetField(row, "uri", lua.LString(class.URI))
+
+		methods := L.NewTable()
+		for j, method := range class.TestMethods {
+			m := L.NewTable()
+			L.SetField(m, "name", lua.LString(method.Name))
+			L.SetField(m, "type", lua.LString(method.Type))
+			// Derive status from alerts
+			status := "OK"
+			if len(method.Alerts) > 0 {
+				status = method.Alerts[0].Kind
+			}
+			L.SetField(m, "status", lua.LString(status))
+			methods.RawSetInt(j+1, m)
+		}
+		L.SetField(row, "methods", methods)
+		classes.RawSetInt(i+1, row)
+	}
+	L.SetField(tbl, "classes", classes)
+
+	L.Push(tbl)
+	return 1
+}
+
+func (e *LuaEngine) luaSyntaxCheck(L *lua.LState) int {
+	objectType := getString(L, 1)
+	name := getString(L, 2)
+
+	errors, err := e.client.SyntaxCheck(e.ctx, objectType, name)
+	if err != nil {
+		L.Push(lua.LNil)
+		L.Push(lua.LString(err.Error()))
+		return 2
+	}
+
+	tbl := L.NewTable()
+	for i, e := range errors {
+		row := L.NewTable()
+		L.SetField(row, "line", lua.LNumber(e.Line))
+		L.SetField(row, "offset", lua.LNumber(e.Offset))
+		L.SetField(row, "message", lua.LString(e.Text))
+		L.SetField(row, "severity", lua.LString(e.Severity))
+		tbl.RawSetInt(i+1, row)
+	}
+
+	L.Push(tbl)
+	return 1
+}

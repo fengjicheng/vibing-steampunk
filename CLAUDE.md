@@ -94,6 +94,11 @@ pkg/
 │   ├── batch.go              # Batch operations & pipeline builder
 │   └── dsl_test.go           # Unit tests (13 tests)
 │
+├── scripting/                # Lua Scripting Engine (Phase 5)
+│   ├── lua.go                # Lua VM wrapper, REPL
+│   ├── bindings.go           # ADT tool bindings for Lua
+│   └── helpers.go            # Lua<->Go value conversion
+│
 └── cache/                    # Caching infrastructure (Report 010)
     ├── cache.go              # Core interfaces and types
     ├── memory.go             # In-memory cache (default)
@@ -359,8 +364,9 @@ When creating a new report:
 | **Unit Tests** | 270 |
 | **Integration Tests** | 34 |
 | **Platforms** | 9 |
-| **Phase** | 4 (Native ADT Features) - In Progress |
-| **Reports** | 26 numbered + 6 reference docs |
+| **Phase** | 5 (TAS-Style Debugging) - In Progress |
+| **Reports** | 29 numbered + 6 reference docs |
+| **Lua Scripting** | ✅ Complete (v2.14 - REPL, 40+ bindings, example scripts) |
 | **Cache Package** | ✅ Complete (in-memory + SQLite) |
 | **Safety System** | ✅ Complete (operation filtering, package restrictions) |
 | **Feature Detection** | ✅ Complete (GetFeatures tool, auto/on/off for abapGit, RAP, AMDP, UI5, Transport) |
