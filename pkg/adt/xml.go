@@ -164,14 +164,16 @@ type TableStructure struct {
 	Fields      []TableField `xml:"field,omitempty"`
 }
 
-// TableField represents a field in a table/structure.
+// TableField represents a field in a table/structure definition.
+// Supports both XML (for GetTable) and JSON (for CreateTable) serialization.
 type TableField struct {
-	Name        string `xml:"name,attr"`
-	Type        string `xml:"type,attr"`
-	Length      int    `xml:"length,attr,omitempty"`
-	Decimals    int    `xml:"decimals,attr,omitempty"`
-	Description string `xml:"description,attr,omitempty"`
-	IsKey       bool   `xml:"isKey,attr,omitempty"`
+	Name        string `xml:"name,attr" json:"name"`                   // Field name
+	Type        string `xml:"type,attr" json:"type"`                   // ABAP type: CHAR, NUMC, INT4, DEC, STRING, etc.
+	Length      int    `xml:"length,attr,omitempty" json:"length,omitempty"`     // Length for CHAR, NUMC, RAW, etc.
+	Decimals    int    `xml:"decimals,attr,omitempty" json:"decimals,omitempty"` // Decimals for DEC, CURR, QUAN
+	Description string `xml:"description,attr,omitempty" json:"description,omitempty"`
+	IsKey       bool   `xml:"isKey,attr,omitempty" json:"key,omitempty"`         // Primary key field
+	NotNull     bool   `xml:"-" json:"notNull,omitempty"`                        // NOT NULL constraint
 }
 
 // ParseSearchResults parses XML search results.

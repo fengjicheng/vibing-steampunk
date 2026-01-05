@@ -817,3 +817,212 @@ func parsePublishResult(data []byte) (*PublishResult, error) {
 		LongText:  resp.Values.Data.LongText,
 	}, nil
 }
+
+// --- DDIC Table/Structure Operations ---
+
+// CreateTableOptions defines options for creating a DDIC table.
+type CreateTableOptions struct {
+	Name          string       `json:"name"`          // Table name (uppercase, max 30 chars, must start with Z/Y)
+	Description   string       `json:"description"`   // Short description
+	Package       string       `json:"package"`       // Target package
+	Fields        []TableField `json:"fields"`        // Field definitions
+	Transport     string       `json:"transport,omitempty"` // Transport request (optional for $TMP)
+	DeliveryClass string       `json:"deliveryClass,omitempty"` // A=Application, C=Customizing, L=Temp, etc. (default: A)
+	TableCategory string       `json:"tableCategory,omitempty"` // TRANSPARENT (default), STRUCTURE, etc.
+}
+
+// CreateTable creates a new DDIC transparent table from JSON-like options.
+// This is a high-level tool that handles the full workflow: create → set source → activate.
+func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error {
+	if err := c.checkSafety(OpCreate, "CreateTable"); err != nil {
+		return err
+	}
+
+	// Validate input
+	opts.Name = strings.ToUpper(opts.Name)
+	if opts.Name == "" || len(opts.Name) > 30 {
+		return fmt.Errorf("table name must be 1-30 characters")
+	}
+	if len(opts.Fields) == 0 {
+		return fmt.Errorf("at least one field is required")
+	}
+	if opts.Package == "" {
+		opts.Package = "$TMP"
+	}
+	if opts.DeliveryClass == "" {
+		opts.DeliveryClass = "A"
+	}
+	if opts.TableCategory == "" {
+		opts.TableCategory = "TRANSPARENT"
+	}
+
+	// Generate DDL source
+	ddlSource := generateTableDDL(opts)
+
+	// Step 1: Create table object
+	createBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<blue:blueSource xmlns:blue="http://www.sap.com/wbobj/blue"
+                 xmlns:adtcore="http://www.sap.com/adt/core"
+                 adtcore:name="%s"
+                 adtcore:type="TABL/DT"
+                 adtcore:description="%s">
+  <adtcore:packageRef adtcore:name="%s"/>
+</blue:blueSource>`, opts.Name, escapeXML(opts.Description), opts.Package)
+
+	params := url.Values{}
+	if opts.Transport != "" {
+		params.Set("corrNr", opts.Transport)
+	}
+
+	_, err := c.transport.Request(ctx, "/sap/bc/adt/ddic/tables", &RequestOptions{
+		Method:      http.MethodPost,
+		Query:       params,
+		Body:        []byte(createBody),
+		ContentType: "application/vnd.sap.adt.tables.v2+xml",
+		Accept:      "application/vnd.sap.adt.tables.v2+xml",
+	})
+	if err != nil {
+		return fmt.Errorf("creating table object: %w", err)
+	}
+
+	// Step 2: Lock, update source, unlock
+	tableURL := fmt.Sprintf("/sap/bc/adt/ddic/tables/%s", strings.ToLower(opts.Name))
+	sourceURL := tableURL + "/source/main"
+
+	lock, err := c.LockObject(ctx, tableURL, "MODIFY")
+	if err != nil {
+		return fmt.Errorf("locking table: %w", err)
+	}
+
+	params = url.Values{}
+	params.Set("lockHandle", lock.LockHandle)
+	if opts.Transport != "" {
+		params.Set("corrNr", opts.Transport)
+	}
+
+	_, err = c.transport.Request(ctx, sourceURL, &RequestOptions{
+		Method:      http.MethodPut,
+		Query:       params,
+		Body:        []byte(ddlSource),
+		ContentType: "text/plain",
+	})
+	if err != nil {
+		c.UnlockObject(ctx, tableURL, lock.LockHandle)
+		return fmt.Errorf("updating table source: %w", err)
+	}
+
+	// Unlock BEFORE activation
+	c.UnlockObject(ctx, tableURL, lock.LockHandle)
+
+	// Step 3: Activate
+	if _, err := c.Activate(ctx, tableURL, opts.Name); err != nil {
+		return fmt.Errorf("activating table: %w", err)
+	}
+
+	return nil
+}
+
+// generateTableDDL converts CreateTableOptions to CDS-style DDL source.
+func generateTableDDL(opts CreateTableOptions) string {
+	var sb strings.Builder
+
+	// Annotations - must match SAP's expected format
+	sb.WriteString(fmt.Sprintf("@EndUserText.label : '%s'\n", escapeQuote(opts.Description)))
+	sb.WriteString("@AbapCatalog.enhancement.category : #NOT_EXTENSIBLE\n")
+	sb.WriteString(fmt.Sprintf("@AbapCatalog.tableCategory : #%s\n", opts.TableCategory))
+	sb.WriteString(fmt.Sprintf("@AbapCatalog.deliveryClass : #%s\n", opts.DeliveryClass))
+	sb.WriteString("@AbapCatalog.dataMaintenance : #ALLOWED\n")
+	sb.WriteString(fmt.Sprintf("define table %s {\n\n", strings.ToLower(opts.Name)))
+
+	// Auto-add MANDT as first key field (standard SAP practice)
+	sb.WriteString("  key client : abap.clnt not null;\n")
+
+	// User-defined fields
+	for _, f := range opts.Fields {
+		fieldName := strings.ToLower(f.Name)
+		fieldType := mapFieldType(f)
+
+		if f.IsKey {
+			sb.WriteString(fmt.Sprintf("  key %s : %s not null;\n", fieldName, fieldType))
+		} else if f.NotNull {
+			sb.WriteString(fmt.Sprintf("  %s : %s not null;\n", fieldName, fieldType))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %s : %s;\n", fieldName, fieldType))
+		}
+	}
+
+	sb.WriteString("\n}\n")
+	return sb.String()
+}
+
+// mapFieldType converts a simple type spec to ABAP DDL type.
+func mapFieldType(f TableField) string {
+	t := strings.ToUpper(f.Type)
+
+	// Handle built-in types with length
+	switch t {
+	case "CHAR":
+		if f.Length > 0 {
+			return fmt.Sprintf("abap.char(%d)", f.Length)
+		}
+		return "abap.char(1)"
+	case "NUMC":
+		if f.Length > 0 {
+			return fmt.Sprintf("abap.numc(%d)", f.Length)
+		}
+		return "abap.numc(10)"
+	case "RAW":
+		if f.Length > 0 {
+			return fmt.Sprintf("abap.raw(%d)", f.Length)
+		}
+		return "abap.raw(16)"
+	case "DEC", "CURR", "QUAN":
+		l := f.Length
+		if l == 0 {
+			l = 15
+		}
+		d := f.Decimals
+		return fmt.Sprintf("abap.dec(%d,%d)", l, d)
+	case "INT1":
+		return "abap.int1"
+	case "INT2":
+		return "abap.int2"
+	case "INT4":
+		return "abap.int4"
+	case "INT8":
+		return "abap.int8"
+	case "FLTP":
+		return "abap.fltp"
+	case "STRING":
+		return "abap.string(0)"
+	case "RAWSTRING":
+		return "abap.rawstring(0)"
+	case "DATS", "DATE":
+		return "abap.dats"
+	case "TIMS", "TIME":
+		return "abap.tims"
+	case "TIMESTAMPL":
+		return "timestampl"
+	case "UTCLONG":
+		return "abap.utclong"
+	case "SYSUUID_X16", "UUID":
+		return "sysuuid_x16"
+	case "MANDT", "CLIENT":
+		return "mandt"
+	}
+
+	// Check for CHARnn, NUMCnn shorthand (e.g., CHAR32, NUMC10)
+	if strings.HasPrefix(t, "CHAR") && len(t) > 4 {
+		return fmt.Sprintf("abap.char(%s)", t[4:])
+	}
+	if strings.HasPrefix(t, "NUMC") && len(t) > 4 {
+		return fmt.Sprintf("abap.numc(%s)", t[4:])
+	}
+
+	// Assume it's a data element name
+	return strings.ToLower(t)
+}
+
+func escapeQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}

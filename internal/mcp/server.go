@@ -278,6 +278,7 @@ func (s *Server) registerTools(mode string, disabledGroups string) {
 		"PrettyPrint":         true,  // Format ABAP code
 		"GetInactiveObjects":  true,  // List pending activations
 		"CreatePackage":       true,  // Create local packages ($...)
+		"CreateTable":         true,  // Create DDIC tables from JSON
 
 		// Advanced/Edge cases (2)
 		"LockObject":   true,
@@ -1168,6 +1169,34 @@ func (s *Server) registerTools(mode string, disabledGroups string) {
 			mcp.Description("Parent package name (optional, e.g., $TMP). If not specified, creates a root-level local package."),
 		),
 	), s.handleCreatePackage)
+	}
+
+	// CreateTable - Create DDIC tables from JSON
+	if shouldRegister("CreateTable") {
+		s.mcpServer.AddTool(mcp.NewTool("CreateTable",
+			mcp.WithDescription("Create a DDIC transparent table from a simple JSON definition. Handles full workflow: create → set source → activate. Supports common ABAP types: CHAR, NUMC, INT4, DEC, STRING, TIMESTAMPL, UUID, etc."),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("Table name (uppercase, max 30 chars, must start with Z/Y)"),
+			),
+			mcp.WithString("description",
+				mcp.Required(),
+				mcp.Description("Short description of the table"),
+			),
+			mcp.WithString("package",
+				mcp.Description("Target package (default: $TMP)"),
+			),
+			mcp.WithString("fields",
+				mcp.Required(),
+				mcp.Description("JSON array of fields: [{\"name\":\"ID\",\"type\":\"CHAR32\",\"key\":true},{\"name\":\"VALUE\",\"type\":\"STRING\"}]. Types: CHAR/CHARnn, NUMC/NUMCnn, INT4, DEC, STRING, TIMESTAMPL, UUID, DATS, TIMS, or data element name."),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Transport request number (optional for $TMP)"),
+			),
+			mcp.WithString("delivery_class",
+				mcp.Description("Delivery class: A=Application (default), C=Customizing, L=Temporary"),
+			),
+		), s.handleCreateTable)
 	}
 
 	// DeleteObject
@@ -3276,6 +3305,73 @@ func (s *Server) handleCreatePackage(ctx context.Context, request mcp.CallToolRe
 	}
 	if parent != "" {
 		result["parent"] = parent
+	}
+	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+}
+
+func (s *Server) handleCreateTable(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	name, ok := request.Params.Arguments["name"].(string)
+	if !ok || name == "" {
+		return newToolResultError("name is required"), nil
+	}
+
+	description, ok := request.Params.Arguments["description"].(string)
+	if !ok || description == "" {
+		return newToolResultError("description is required"), nil
+	}
+
+	fieldsJSON, ok := request.Params.Arguments["fields"].(string)
+	if !ok || fieldsJSON == "" {
+		return newToolResultError("fields is required (JSON array)"), nil
+	}
+
+	// Parse fields JSON
+	var fields []adt.TableField
+	if err := json.Unmarshal([]byte(fieldsJSON), &fields); err != nil {
+		return newToolResultError(fmt.Sprintf("Invalid fields JSON: %v", err)), nil
+	}
+
+	if len(fields) == 0 {
+		return newToolResultError("At least one field is required"), nil
+	}
+
+	// Optional parameters
+	pkg := "$TMP"
+	if p, ok := request.Params.Arguments["package"].(string); ok && p != "" {
+		pkg = strings.ToUpper(p)
+	}
+
+	transport := ""
+	if t, ok := request.Params.Arguments["transport"].(string); ok && t != "" {
+		transport = t
+	}
+
+	deliveryClass := "A"
+	if dc, ok := request.Params.Arguments["delivery_class"].(string); ok && dc != "" {
+		deliveryClass = strings.ToUpper(dc)
+	}
+
+	opts := adt.CreateTableOptions{
+		Name:          name,
+		Description:   description,
+		Package:       pkg,
+		Fields:        fields,
+		Transport:     transport,
+		DeliveryClass: deliveryClass,
+	}
+
+	err := s.adtClient.CreateTable(ctx, opts)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("Failed to create table: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"status":      "created",
+		"table":       strings.ToUpper(name),
+		"package":     pkg,
+		"description": description,
+		"fields":      len(fields),
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil

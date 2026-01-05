@@ -370,7 +370,7 @@ func (c *Client) GetMessageClass(ctx context.Context, msgClassName string) (*Mes
 	path := fmt.Sprintf("/sap/bc/adt/messageclass/%s", url.PathEscape(strings.ToLower(msgClassName)))
 	resp, err := c.transport.Request(ctx, path, &RequestOptions{
 		Method: http.MethodGet,
-		Accept: "application/xml",
+		Accept: "application/vnd.sap.adt.mc.messageclass+xml",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("getting message class: %w", err)
