@@ -2885,3 +2885,378 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		return result, nil
 	}
 }
+
+// --- Compare Source Tool ---
+
+// SourceDiff represents a diff between two sources.
+type SourceDiff struct {
+	Object1     string   `json:"object1"`
+	Object2     string   `json:"object2"`
+	Identical   bool     `json:"identical"`
+	AddedLines  int      `json:"addedLines"`
+	RemovedLines int     `json:"removedLines"`
+	Diff        string   `json:"diff"`
+}
+
+// CompareSource compares source code of two objects and returns a unified diff.
+// Supports comparing any two objects that can be read via GetSource.
+func (c *Client) CompareSource(ctx context.Context, type1, name1, type2, name2 string, opts1, opts2 *GetSourceOptions) (*SourceDiff, error) {
+	// Get source of first object
+	source1, err := c.GetSource(ctx, type1, name1, opts1)
+	if err != nil {
+		return nil, fmt.Errorf("getting source for %s %s: %w", type1, name1, err)
+	}
+
+	// Get source of second object
+	source2, err := c.GetSource(ctx, type2, name2, opts2)
+	if err != nil {
+		return nil, fmt.Errorf("getting source for %s %s: %w", type2, name2, err)
+	}
+
+	result := &SourceDiff{
+		Object1:   fmt.Sprintf("%s:%s", type1, name1),
+		Object2:   fmt.Sprintf("%s:%s", type2, name2),
+		Identical: source1 == source2,
+	}
+
+	if result.Identical {
+		result.Diff = "Sources are identical"
+		return result, nil
+	}
+
+	// Generate unified diff
+	lines1 := strings.Split(source1, "\n")
+	lines2 := strings.Split(source2, "\n")
+
+	diff := generateUnifiedDiff(result.Object1, result.Object2, lines1, lines2)
+	result.Diff = diff
+
+	// Count added/removed lines
+	for _, line := range strings.Split(diff, "\n") {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			result.AddedLines++
+		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			result.RemovedLines++
+		}
+	}
+
+	return result, nil
+}
+
+// generateUnifiedDiff creates a unified diff between two sets of lines.
+func generateUnifiedDiff(name1, name2 string, lines1, lines2 []string) string {
+	var diff strings.Builder
+
+	diff.WriteString(fmt.Sprintf("--- %s\n", name1))
+	diff.WriteString(fmt.Sprintf("+++ %s\n", name2))
+
+	// Simple LCS-based diff algorithm
+	m, n := len(lines1), len(lines2)
+
+	// Build LCS table
+	lcs := make([][]int, m+1)
+	for i := range lcs {
+		lcs[i] = make([]int, n+1)
+	}
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if lines1[i-1] == lines2[j-1] {
+				lcs[i][j] = lcs[i-1][j-1] + 1
+			} else if lcs[i-1][j] > lcs[i][j-1] {
+				lcs[i][j] = lcs[i-1][j]
+			} else {
+				lcs[i][j] = lcs[i][j-1]
+			}
+		}
+	}
+
+	// Backtrack to generate diff
+	type diffLine struct {
+		op   byte // ' ', '+', '-'
+		text string
+	}
+	var diffLines []diffLine
+
+	i, j := m, n
+	for i > 0 || j > 0 {
+		if i > 0 && j > 0 && lines1[i-1] == lines2[j-1] {
+			diffLines = append([]diffLine{{' ', lines1[i-1]}}, diffLines...)
+			i--
+			j--
+		} else if j > 0 && (i == 0 || lcs[i][j-1] >= lcs[i-1][j]) {
+			diffLines = append([]diffLine{{'+', lines2[j-1]}}, diffLines...)
+			j--
+		} else {
+			diffLines = append([]diffLine{{'-', lines1[i-1]}}, diffLines...)
+			i--
+		}
+	}
+
+	// Output hunks with context
+	const contextLines = 3
+	inHunk := false
+	hunkStart1, hunkStart2 := 0, 0
+	hunkLen1, hunkLen2 := 0, 0
+	var hunkContent strings.Builder
+	contextBefore := make([]diffLine, 0, contextLines)
+	pendingContext := 0
+
+	flushHunk := func() {
+		if hunkLen1 > 0 || hunkLen2 > 0 {
+			diff.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", hunkStart1, hunkLen1, hunkStart2, hunkLen2))
+			diff.WriteString(hunkContent.String())
+		}
+		hunkContent.Reset()
+		inHunk = false
+		hunkLen1, hunkLen2 = 0, 0
+	}
+
+	line1, line2 := 1, 1
+	for _, dl := range diffLines {
+		if dl.op == ' ' {
+			if inHunk {
+				pendingContext++
+				hunkContent.WriteString(fmt.Sprintf(" %s\n", dl.text))
+				hunkLen1++
+				hunkLen2++
+				if pendingContext >= contextLines*2 {
+					// Too much context, close hunk
+					flushHunk()
+					contextBefore = contextBefore[:0]
+				}
+			} else {
+				// Accumulate context before a hunk
+				if len(contextBefore) >= contextLines {
+					contextBefore = contextBefore[1:]
+				}
+				contextBefore = append(contextBefore, dl)
+			}
+			line1++
+			line2++
+		} else {
+			pendingContext = 0
+			if !inHunk {
+				// Start new hunk
+				inHunk = true
+				hunkStart1 = line1 - len(contextBefore)
+				hunkStart2 = line2 - len(contextBefore)
+				if hunkStart1 < 1 { hunkStart1 = 1 }
+				if hunkStart2 < 1 { hunkStart2 = 1 }
+				// Add context before
+				for _, ctx := range contextBefore {
+					hunkContent.WriteString(fmt.Sprintf(" %s\n", ctx.text))
+					hunkLen1++
+					hunkLen2++
+				}
+				contextBefore = contextBefore[:0]
+			}
+			hunkContent.WriteString(fmt.Sprintf("%c%s\n", dl.op, dl.text))
+			if dl.op == '-' {
+				hunkLen1++
+				line1++
+			} else {
+				hunkLen2++
+				line2++
+			}
+		}
+	}
+	flushHunk()
+
+	return diff.String()
+}
+
+// --- Clone Object Tool ---
+
+// CloneObjectResult represents the result of cloning an object.
+type CloneObjectResult struct {
+	Success     bool   `json:"success"`
+	SourceName  string `json:"sourceName"`
+	TargetName  string `json:"targetName"`
+	ObjectType  string `json:"objectType"`
+	Package     string `json:"package"`
+	Message     string `json:"message"`
+}
+
+// CloneObject copies an ABAP object to a new name.
+// Supported types: PROG, CLAS, INTF
+func (c *Client) CloneObject(ctx context.Context, objectType, sourceName, targetName, targetPackage string) (*CloneObjectResult, error) {
+	// Safety check
+	if err := c.checkSafety(OpCreate, "CloneObject"); err != nil {
+		return nil, err
+	}
+
+	result := &CloneObjectResult{
+		SourceName: sourceName,
+		TargetName: targetName,
+		ObjectType: objectType,
+		Package:    targetPackage,
+	}
+
+	// Get source of original object
+	source, err := c.GetSource(ctx, objectType, sourceName, nil)
+	if err != nil {
+		result.Message = fmt.Sprintf("Failed to get source: %v", err)
+		return result, nil
+	}
+
+	// Replace object name in source
+	objectType = strings.ToUpper(objectType)
+	sourceName = strings.ToUpper(sourceName)
+	targetName = strings.ToUpper(targetName)
+
+	// Replace the object name in the source code
+	var newSource string
+	switch objectType {
+	case "PROG":
+		// Replace REPORT <old> with REPORT <new>
+		re := regexp.MustCompile(`(?i)(REPORT\s+)` + regexp.QuoteMeta(sourceName))
+		newSource = re.ReplaceAllString(source, "${1}"+targetName)
+	case "CLAS":
+		// Replace CLASS <old> with CLASS <new>
+		re := regexp.MustCompile(`(?i)(CLASS\s+)` + regexp.QuoteMeta(sourceName))
+		newSource = re.ReplaceAllString(source, "${1}"+targetName)
+	case "INTF":
+		// Replace INTERFACE <old> with INTERFACE <new>
+		re := regexp.MustCompile(`(?i)(INTERFACE\s+)` + regexp.QuoteMeta(sourceName))
+		newSource = re.ReplaceAllString(source, "${1}"+targetName)
+	default:
+		result.Message = fmt.Sprintf("Unsupported object type for cloning: %s", objectType)
+		return result, nil
+	}
+
+	// Write as new object
+	description := fmt.Sprintf("Copy of %s", sourceName)
+	writeResult, err := c.WriteSource(ctx, objectType, targetName, newSource, &WriteSourceOptions{
+		Package:     targetPackage,
+		Description: description,
+		Mode:        "create",
+	})
+	if err != nil {
+		result.Message = fmt.Sprintf("Failed to create clone: %v", err)
+		return result, nil
+	}
+
+	if !writeResult.Success {
+		result.Message = writeResult.Message
+		return result, nil
+	}
+
+	result.Success = true
+	result.Message = fmt.Sprintf("Successfully cloned %s to %s", sourceName, targetName)
+	return result, nil
+}
+
+// --- GetClassInfo Tool ---
+
+// ClassInfo contains metadata about an ABAP class.
+type ClassInfo struct {
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	Package       string   `json:"package,omitempty"`
+	Category      string   `json:"category,omitempty"`      // Regular, Abstract, Final
+	Visibility    string   `json:"visibility,omitempty"`    // Public, Protected, Private
+	Superclass    string   `json:"superclass,omitempty"`
+	Interfaces    []string `json:"interfaces,omitempty"`
+	Methods       []string `json:"methods,omitempty"`
+	Attributes    []string `json:"attributes,omitempty"`
+	HasTestClass  bool     `json:"hasTestClass"`
+	IsAbstract    bool     `json:"isAbstract"`
+	IsFinal       bool     `json:"isFinal"`
+}
+
+// GetClassInfo retrieves class metadata without full source code.
+// Uses GetObjectStructure for quick metadata extraction.
+func (c *Client) GetClassInfo(ctx context.Context, className string) (*ClassInfo, error) {
+	// Safety check
+	if err := c.checkSafety(OpRead, "GetClassInfo"); err != nil {
+		return nil, err
+	}
+
+	className = strings.ToUpper(className)
+
+	// Get object structure
+	structure, err := c.GetObjectStructureCAI(ctx, className, 100)
+	if err != nil {
+		return nil, fmt.Errorf("getting class structure: %w", err)
+	}
+
+	info := &ClassInfo{
+		Name:       className,
+		Methods:    make([]string, 0),
+		Attributes: make([]string, 0),
+		Interfaces: make([]string, 0),
+	}
+
+	// Parse root node
+	if structure != nil {
+		info.Description = structure.Description
+
+		// Recursive function to extract info from tree
+		var extractInfo func(node *ObjectExplorerNode)
+		extractInfo = func(node *ObjectExplorerNode) {
+			nodeType := strings.ToUpper(node.Type)
+			nodeName := node.Name
+
+			switch {
+			case strings.Contains(nodeType, "METHOD"):
+				info.Methods = append(info.Methods, nodeName)
+			case strings.Contains(nodeType, "ATTR"):
+				info.Attributes = append(info.Attributes, nodeName)
+			case strings.Contains(nodeType, "INTF"):
+				info.Interfaces = append(info.Interfaces, nodeName)
+			case strings.Contains(nodeType, "TEST"):
+				info.HasTestClass = true
+			}
+
+			// Check for superclass in description
+			if strings.Contains(strings.ToUpper(node.Description), "INHERITING") {
+				parts := strings.Fields(node.Description)
+				for i, p := range parts {
+					if strings.ToUpper(p) == "FROM" && i+1 < len(parts) {
+						info.Superclass = parts[i+1]
+					}
+				}
+			}
+
+			// Recurse into children
+			for i := range node.Children {
+				extractInfo(&node.Children[i])
+			}
+		}
+
+		extractInfo(structure)
+	}
+
+	// Check for abstract/final in main source (quick scan)
+	source, err := c.GetClassSource(ctx, className)
+	if err == nil {
+		sourceUpper := strings.ToUpper(source)
+		if strings.Contains(sourceUpper, "CLASS "+className+" DEFINITION ABSTRACT") ||
+			strings.Contains(sourceUpper, "ABSTRACT DEFINITION") {
+			info.IsAbstract = true
+			info.Category = "Abstract"
+		}
+		if strings.Contains(sourceUpper, "CLASS "+className+" DEFINITION FINAL") ||
+			strings.Contains(sourceUpper, "FINAL DEFINITION") {
+			info.IsFinal = true
+			info.Category = "Final"
+		}
+		if info.Category == "" {
+			info.Category = "Regular"
+		}
+
+		// Extract package from source header if present
+		lines := strings.Split(source, "\n")
+		for _, line := range lines[:min(20, len(lines))] {
+			if strings.Contains(strings.ToUpper(line), "DEVC") {
+				// Try to extract package
+				re := regexp.MustCompile(`DEVC\s+(\$?\w+)`)
+				if matches := re.FindStringSubmatch(line); len(matches) > 1 {
+					info.Package = matches[1]
+				}
+			}
+		}
+	}
+
+	return info, nil
+}

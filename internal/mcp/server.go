@@ -269,7 +269,7 @@ func (s *Server) registerTools(mode string, disabledGroups string) {
 		"FindDefinition":  true,
 		"FindReferences":  true,
 
-		// Development tools (8)
+		// Development tools (11)
 		"SyntaxCheck":         true,
 		"RunUnitTests":        true,
 		"RunATCCheck":         true,  // Code quality checks
@@ -279,6 +279,9 @@ func (s *Server) registerTools(mode string, disabledGroups string) {
 		"GetInactiveObjects":  true,  // List pending activations
 		"CreatePackage":       true,  // Create local packages ($...)
 		"CreateTable":         true,  // Create DDIC tables from JSON
+		"CompareSource":       true,  // Diff two objects
+		"CloneObject":         true,  // Copy object to new name
+		"GetClassInfo":        true,  // Quick class metadata
 
 		// Advanced/Edge cases (2)
 		"LockObject":   true,
@@ -1197,6 +1200,75 @@ func (s *Server) registerTools(mode string, disabledGroups string) {
 				mcp.Description("Delivery class: A=Application (default), C=Customizing, L=Temporary"),
 			),
 		), s.handleCreateTable)
+	}
+
+	// CompareSource - Diff two objects
+	if shouldRegister("CompareSource") {
+		s.mcpServer.AddTool(mcp.NewTool("CompareSource",
+			mcp.WithDescription("Compare source code of two objects and return unified diff. Supports all object types from GetSource."),
+			mcp.WithString("type1",
+				mcp.Required(),
+				mcp.Description("Object type of first object: PROG, CLAS, INTF, FUNC, FUGR, INCL, DDLS, BDEF, SRVD"),
+			),
+			mcp.WithString("name1",
+				mcp.Required(),
+				mcp.Description("Name of first object"),
+			),
+			mcp.WithString("type2",
+				mcp.Required(),
+				mcp.Description("Object type of second object (can be same or different)"),
+			),
+			mcp.WithString("name2",
+				mcp.Required(),
+				mcp.Description("Name of second object"),
+			),
+			mcp.WithString("include1",
+				mcp.Description("Class include type for first object if CLAS: definitions, implementations, macros, testclasses"),
+			),
+			mcp.WithString("include2",
+				mcp.Description("Class include type for second object if CLAS"),
+			),
+			mcp.WithString("parent1",
+				mcp.Description("Function group for first object if FUNC"),
+			),
+			mcp.WithString("parent2",
+				mcp.Description("Function group for second object if FUNC"),
+			),
+		), s.handleCompareSource)
+	}
+
+	// CloneObject - Copy object to new name
+	if shouldRegister("CloneObject") {
+		s.mcpServer.AddTool(mcp.NewTool("CloneObject",
+			mcp.WithDescription("Copy an ABAP object to a new name. Replaces object name in source. Supports PROG, CLAS, INTF."),
+			mcp.WithString("object_type",
+				mcp.Required(),
+				mcp.Description("Object type: PROG, CLAS, INTF"),
+			),
+			mcp.WithString("source_name",
+				mcp.Required(),
+				mcp.Description("Name of object to copy"),
+			),
+			mcp.WithString("target_name",
+				mcp.Required(),
+				mcp.Description("Name for the new object"),
+			),
+			mcp.WithString("package",
+				mcp.Required(),
+				mcp.Description("Target package (e.g., $TMP)"),
+			),
+		), s.handleCloneObject)
+	}
+
+	// GetClassInfo - Quick class metadata
+	if shouldRegister("GetClassInfo") {
+		s.mcpServer.AddTool(mcp.NewTool("GetClassInfo",
+			mcp.WithDescription("Get class metadata without full source: methods, attributes, interfaces, superclass, abstract/final status."),
+			mcp.WithString("class_name",
+				mcp.Required(),
+				mcp.Description("Name of the ABAP class"),
+			),
+		), s.handleGetClassInfo)
 	}
 
 	// DeleteObject
@@ -3374,6 +3446,77 @@ func (s *Server) handleCreateTable(ctx context.Context, request mcp.CallToolRequ
 		"fields":      len(fields),
 	}
 	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+}
+
+func (s *Server) handleCompareSource(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	type1, _ := request.Params.Arguments["type1"].(string)
+	name1, _ := request.Params.Arguments["name1"].(string)
+	type2, _ := request.Params.Arguments["type2"].(string)
+	name2, _ := request.Params.Arguments["name2"].(string)
+
+	if type1 == "" || name1 == "" || type2 == "" || name2 == "" {
+		return newToolResultError("type1, name1, type2, and name2 are all required"), nil
+	}
+
+	// Build options for first object
+	opts1 := &adt.GetSourceOptions{}
+	if inc, ok := request.Params.Arguments["include1"].(string); ok && inc != "" {
+		opts1.Include = inc
+	}
+	if parent, ok := request.Params.Arguments["parent1"].(string); ok && parent != "" {
+		opts1.Parent = parent
+	}
+
+	// Build options for second object
+	opts2 := &adt.GetSourceOptions{}
+	if inc, ok := request.Params.Arguments["include2"].(string); ok && inc != "" {
+		opts2.Include = inc
+	}
+	if parent, ok := request.Params.Arguments["parent2"].(string); ok && parent != "" {
+		opts2.Parent = parent
+	}
+
+	diff, err := s.adtClient.CompareSource(ctx, type1, name1, type2, name2, opts1, opts2)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("CompareSource failed: %v", err)), nil
+	}
+
+	output, _ := json.MarshalIndent(diff, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+}
+
+func (s *Server) handleCloneObject(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	objectType, _ := request.Params.Arguments["object_type"].(string)
+	sourceName, _ := request.Params.Arguments["source_name"].(string)
+	targetName, _ := request.Params.Arguments["target_name"].(string)
+	pkg, _ := request.Params.Arguments["package"].(string)
+
+	if objectType == "" || sourceName == "" || targetName == "" || pkg == "" {
+		return newToolResultError("object_type, source_name, target_name, and package are all required"), nil
+	}
+
+	result, err := s.adtClient.CloneObject(ctx, objectType, sourceName, targetName, pkg)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("CloneObject failed: %v", err)), nil
+	}
+
+	output, _ := json.MarshalIndent(result, "", "  ")
+	return mcp.NewToolResultText(string(output)), nil
+}
+
+func (s *Server) handleGetClassInfo(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	className, _ := request.Params.Arguments["class_name"].(string)
+	if className == "" {
+		return newToolResultError("class_name is required"), nil
+	}
+
+	info, err := s.adtClient.GetClassInfo(ctx, className)
+	if err != nil {
+		return newToolResultError(fmt.Sprintf("GetClassInfo failed: %v", err)), nil
+	}
+
+	output, _ := json.MarshalIndent(info, "", "  ")
 	return mcp.NewToolResultText(string(output)), nil
 }
 
