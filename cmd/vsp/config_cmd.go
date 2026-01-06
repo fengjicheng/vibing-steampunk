@@ -214,12 +214,12 @@ var mcpToVspCmd = &cobra.Command{
 	Long: `Parse .mcp.json and create/update .vsp.json with system entries.
 
 For each vsp-* server in .mcp.json, extracts:
-  - URL from --url arg
-  - User from --user arg
+  - URL from --url arg or env.SAP_URL
+  - User from --user arg or env.SAP_USER
+  - Password from env.SAP_PASSWORD (if not a placeholder)
   - Client from --client arg
-  - Other settings
-
-Passwords are NOT imported (use VSP_<SYSTEM>_PASSWORD env vars).`,
+  - Cookie auth from --cookie-file or --cookie-string
+  - Other settings (insecure, read-only, etc.)`,
 	RunE: runMcpToVsp,
 }
 
@@ -274,7 +274,11 @@ func runMcpToVsp(cmd *cobra.Command, args []string) error {
 		}
 
 		vspCfg.Systems[sysName] = sys
-		fmt.Printf("  %s %s: %s [%s@%s]\n", action, sysName, sys.URL, sys.User, sys.Client)
+		pwdInfo := ""
+		if sys.Password != "" {
+			pwdInfo = " (pwd:imported)"
+		}
+		fmt.Printf("  %s %s: %s [%s@%s]%s\n", action, sysName, sys.URL, sys.User, sys.Client, pwdInfo)
 		imported++
 
 		// Set first system as default if none set
@@ -347,7 +351,7 @@ func parseServerArgs(serverMap map[string]interface{}) config.SystemConfig {
 		}
 	}
 
-	// Also check env block for URL/user if not found in args
+	// Also check env block for all settings
 	if env, ok := serverMap["env"].(map[string]interface{}); ok {
 		if sys.URL == "" {
 			if url, ok := env["SAP_URL"].(string); ok {
@@ -358,6 +362,32 @@ func parseServerArgs(serverMap map[string]interface{}) config.SystemConfig {
 			if user, ok := env["SAP_USER"].(string); ok {
 				sys.User = user
 			}
+		}
+		// Import password from env block (if it's a real value, not a placeholder)
+		if pwd, ok := env["SAP_PASSWORD"].(string); ok {
+			if pwd != "" && pwd != "YOUR_PASSWORD_HERE" && !strings.HasPrefix(pwd, "YOUR_") {
+				sys.Password = pwd
+			}
+		}
+		// Client
+		if client, ok := env["SAP_CLIENT"].(string); ok && client != "" {
+			sys.Client = client
+		}
+		// Language
+		if lang, ok := env["SAP_LANGUAGE"].(string); ok && lang != "" {
+			sys.Language = lang
+		}
+		// Insecure
+		if insecure, ok := env["SAP_INSECURE"].(string); ok {
+			sys.Insecure = insecure == "true"
+		}
+		// Cookie file
+		if cookieFile, ok := env["SAP_COOKIE_FILE"].(string); ok && cookieFile != "" {
+			sys.CookieFile = cookieFile
+		}
+		// Cookie string
+		if cookieStr, ok := env["SAP_COOKIE_STRING"].(string); ok && cookieStr != "" {
+			sys.CookieString = cookieStr
 		}
 	}
 

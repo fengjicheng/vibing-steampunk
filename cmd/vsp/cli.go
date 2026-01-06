@@ -133,11 +133,12 @@ func getClient(params *systemParams) (*adt.Client, error) {
 
 // getWSClient creates an AMDP WebSocket client for GitExport.
 func getWSClient(ctx context.Context, params *systemParams) (*adt.AMDPWebSocketClient, error) {
+	// NewAMDPWebSocketClient(baseURL, client, user, password, insecure)
 	wsClient := adt.NewAMDPWebSocketClient(
 		params.URL,
+		params.Client,
 		params.User,
 		params.Password,
-		params.Client,
 		params.Insecure,
 	)
 
