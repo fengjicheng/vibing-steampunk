@@ -2244,7 +2244,7 @@ func (s *Server) registerTools(mode string, disabledGroups string) {
 	// SetTextElements
 	if shouldRegister("SetTextElements") {
 		s.mcpServer.AddTool(mcp.NewTool("SetTextElements",
-			mcp.WithDescription("Set program text elements (selection texts and text symbols). Use for adding descriptions to selection screen parameters and text symbols."),
+			mcp.WithDescription("Set program text elements (selection texts, text symbols, and heading texts). Use for adding descriptions to selection screen parameters, text symbols, and list/column headings."),
 			mcp.WithString("program",
 				mcp.Description("Program name"),
 				mcp.Required(),
@@ -2257,6 +2257,9 @@ func (s *Server) registerTools(mode string, disabledGroups string) {
 			),
 			mcp.WithString("text_symbols",
 				mcp.Description("JSON object of text symbols (e.g., '{\"001\":\"Header Text\",\"002\":\"Footer\"}')"),
+			),
+			mcp.WithString("heading_texts",
+				mcp.Description("JSON object of heading texts for list/column headings (e.g., '{\"001\":\"Report Title\",\"002\":\"Column Header\"}')"),
 			),
 		), s.handleSetTextElements)
 	}
@@ -2315,6 +2318,54 @@ func (s *Server) registerTools(mode string, disabledGroups string) {
 		), s.handleInstallDummyTest)
 	}
 
+	// Register tool aliases for common operations
+	// These provide short names for frequently used tools
+	s.registerToolAliases(shouldRegister)
+}
+
+// registerToolAliases registers short alias names for frequently used tools.
+// Aliases provide quick access: gs→GetSource, ws→WriteSource, etc.
+func (s *Server) registerToolAliases(shouldRegister func(string) bool) {
+	// Define aliases: alias -> canonical tool name
+	// Only register alias if the canonical tool is registered
+	type aliasInfo struct {
+		canonical string
+		desc      string
+		handler   func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
+	}
+
+	aliases := map[string]aliasInfo{
+		// Core read/write
+		"gs": {"GetSource", "Alias for GetSource - read ABAP source code", s.handleGetSource},
+		"ws": {"WriteSource", "Alias for WriteSource - write ABAP source code", s.handleWriteSource},
+		"es": {"EditSource", "Alias for EditSource - surgical string replacement", s.handleEditSource},
+
+		// Search
+		"so": {"SearchObject", "Alias for SearchObject - find ABAP objects", s.handleSearchObject},
+		"gro": {"GrepObjects", "Alias for GrepObjects - regex search in objects", s.handleGrepObjects},
+		"grp": {"GrepPackages", "Alias for GrepPackages - regex search in packages", s.handleGrepPackages},
+
+		// Common operations
+		"gt": {"GetTable", "Alias for GetTable - get table structure", s.handleGetTable},
+		"gtc": {"GetTableContents", "Alias for GetTableContents - read table data", s.handleGetTableContents},
+		"rq": {"RunQuery", "Alias for RunQuery - execute SQL query", s.handleRunQuery},
+		"sc": {"SyntaxCheck", "Alias for SyntaxCheck - check ABAP syntax", s.handleSyntaxCheck},
+		"act": {"Activate", "Alias for Activate - activate ABAP object", s.handleActivate},
+
+		// Testing
+		"rut": {"RunUnitTests", "Alias for RunUnitTests - run ABAP unit tests", s.handleRunUnitTests},
+		"atc": {"RunATCCheck", "Alias for RunATCCheck - run ATC code check", s.handleRunATCCheck},
+	}
+
+	for alias, info := range aliases {
+		if shouldRegister(info.canonical) {
+			s.mcpServer.AddTool(mcp.NewTool(alias,
+				mcp.WithDescription(info.desc),
+				// Aliases inherit all parameters from the canonical tool
+				// The handler is the same, so parameters work identically
+			), info.handler)
+		}
+	}
 }
 
 // newToolResultError creates an error result for tool execution failures.
@@ -6304,8 +6355,16 @@ func (s *Server) handleSetTextElements(ctx context.Context, request mcp.CallTool
 		params.TextSymbols = textSyms
 	}
 
-	if params.SelectionTexts == nil && params.TextSymbols == nil {
-		return newToolResultError("At least one of selection_texts or text_symbols is required"), nil
+	if headTextsStr, ok := request.Params.Arguments["heading_texts"].(string); ok && headTextsStr != "" {
+		var headTexts map[string]string
+		if err := json.Unmarshal([]byte(headTextsStr), &headTexts); err != nil {
+			return newToolResultError(fmt.Sprintf("Invalid heading_texts JSON: %v", err)), nil
+		}
+		params.HeadingTexts = headTexts
+	}
+
+	if params.SelectionTexts == nil && params.TextSymbols == nil && params.HeadingTexts == nil {
+		return newToolResultError("At least one of selection_texts, text_symbols, or heading_texts is required"), nil
 	}
 
 	result, err := s.amdpWSClient.SetTextElements(ctx, params)
@@ -6318,6 +6377,7 @@ func (s *Server) handleSetTextElements(ctx context.Context, request mcp.CallTool
 	sb.WriteString(fmt.Sprintf("Status: %s\n", result.Status))
 	sb.WriteString(fmt.Sprintf("Selection Texts Set: %d\n", result.SelectionTextsSet))
 	sb.WriteString(fmt.Sprintf("Text Symbols Set: %d\n", result.TextSymbolsSet))
+	sb.WriteString(fmt.Sprintf("Heading Texts Set: %d\n", result.HeadingTextsSet))
 
 	return mcp.NewToolResultText(sb.String()), nil
 }

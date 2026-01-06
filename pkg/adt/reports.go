@@ -45,6 +45,7 @@ type TextElements struct {
 	Language       string            `json:"language"`
 	SelectionTexts map[string]string `json:"selection_texts"`
 	TextSymbols    map[string]string `json:"text_symbols"`
+	HeadingTexts   map[string]string `json:"heading_texts"`
 }
 
 // SetTextElementsParams contains parameters for setting text elements.
@@ -53,6 +54,7 @@ type SetTextElementsParams struct {
 	Language       string            `json:"language,omitempty"`
 	SelectionTexts map[string]string `json:"selection_texts,omitempty"`
 	TextSymbols    map[string]string `json:"text_symbols,omitempty"`
+	HeadingTexts   map[string]string `json:"heading_texts,omitempty"`
 }
 
 // SetTextElementsResult contains result of setting text elements.
@@ -62,6 +64,7 @@ type SetTextElementsResult struct {
 	Language          string `json:"language"`
 	SelectionTextsSet int    `json:"selection_texts_set"`
 	TextSymbolsSet    int    `json:"text_symbols_set"`
+	HeadingTextsSet   int    `json:"heading_texts_set"`
 }
 
 // ReportVariant describes a report variant.
@@ -144,6 +147,9 @@ func (c *AMDPWebSocketClient) SetTextElements(ctx context.Context, params SetTex
 	}
 	if params.TextSymbols != nil {
 		reqParams["text_symbols"] = params.TextSymbols
+	}
+	if params.HeadingTexts != nil {
+		reqParams["heading_texts"] = params.HeadingTexts
 	}
 
 	resp, err := c.sendReportRequest(ctx, "setTextElements", reqParams)
